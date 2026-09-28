@@ -6,7 +6,8 @@ set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards)
 set(PICO_BOARD waveshare_rp2350_touch_lcd_3.49 CACHE STRING "Board type")
 set(PICO_PLATFORM rp2350)
 
-include("$ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake")
+# Pull in the Pico SDK (must be before project)
+include(pico_sdk_import.cmake)
 project(${NAME} C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -19,6 +20,8 @@ pico_sdk_init()
 include(touch349.cmake)
 
 include(lvgl.cmake)
+
+include(fatfs.cmake)
 
 add_subdirectory(src)
 

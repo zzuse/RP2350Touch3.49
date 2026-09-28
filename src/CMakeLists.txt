@@ -10,6 +10,7 @@ target_link_libraries(${NAME}
 	 pico_stdlib
 	 touch349
      lvgl
+     sdcard
      pico_multicore
 	)
 

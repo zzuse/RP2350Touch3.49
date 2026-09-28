@@ -70,6 +70,8 @@
 #define BAT_ADC       40
 #define BAT_CHANNEL   0
 
+#define PA_CTRL       0     // Speaker power amplifier enable (ES8311 audio)
+
 extern uint dma_tx;
 extern dma_channel_config c;
 

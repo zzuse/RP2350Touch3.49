@@ -1,0 +1,93 @@
+/*****************************************************************************
+* | File      	:   audio_pio.c
+* | Author      :   Waveshare Team
+* | Function    :   ES8311 control related PIO interface
+* | Info        :
+*----------------
+* |	This version:   V1.0
+* | Date        :   2025-02-26
+* | Info        :   
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documnetation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to  whom the Software is
+# furished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS OR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+#
+******************************************************************************/
+#ifndef _PICO_AUDIO_PIO_H
+#define _PICO_AUDIO_PIO_H
+
+#include "pico/stdlib.h"
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
+
+#define AUDIO_PIO __CONCAT(pio, PICO_AUDIO_PIO)
+#define GPIO_FUNC_PIOx __CONCAT(GPIO_FUNC_PIO, PICO_AUDIO_PIO)
+
+#define PICO_MCLK_FREQ      24000 * 256
+#define PICO_SAMPLE_FREQ    24000
+#define PICO_AUDIO_VOLUME   73
+#define PICO_AUDIO_COUNT    1
+#define PICO_AUDIO_RES_IN   16
+#define PICO_AUDIO_RES_OUT  16
+#define PICO_AUDIO_MIC_GAIN 3
+#define PICO_AUDIO_COUNT    1
+#define PICO_AUDIO_DOUT     1
+#define PICO_AUDIO_DIN      2
+#define PICO_AUDIO_MCLK     3
+#define PICO_AUDIO_LRCLK    5
+#define PICO_AUDIO_BCLK     4
+#define PICO_AUDIO_PIO_1    0
+#define PICO_AUDIO_PIO_2    0
+#define PICO_AUDIO_SM_DOUT  0
+#define PICO_AUDIO_SM_DIN   1
+#define PICO_AUDIO_SM_MCLK  2
+
+typedef struct pico_audio_struct 
+{
+    uint32_t mclk_freq;  
+    uint32_t sample_freq;    
+    uint8_t  res_in;
+    uint8_t  res_out;    
+    uint8_t  mic_gain;   
+    uint8_t  volume;  
+    uint8_t  channel_count; 
+	uint8_t  audio_dout;
+	uint8_t  audio_din;
+	uint8_t  audio_mclk;
+	uint8_t  audio_lrclk;
+	uint8_t  audio_bclk;
+	PIO	     pio_1;
+	PIO	     pio_2;
+	uint8_t  sm_dout; 
+	uint8_t  sm_din; 
+	uint8_t  sm_mclk; 
+}pico_audio_t;
+
+// Defined once in audio_pio.c, so every file shares the same settings
+extern pico_audio_t pico_audio;
+
+void dout_pio_init() ;
+void din_pio_init();
+void mclk_pio_init();
+void set_mclk_frequency(uint32_t frequency);
+int32_t* data_treating(const int16_t *audio , uint32_t len) ;
+void audio_out(int32_t *samples, int32_t len);
+void Happy_birthday_out();
+void Sine_440hz_out();
+void Loopback_test();
+
+#endif //_PICO_AUDIO_PIO_H
