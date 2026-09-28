@@ -130,9 +130,15 @@ void LVGL_Init(void)
 #endif
 
     /*5.Init DMA for transmit color data from memory to SPI*/
+#if DISP_LANDSCAPE
+    // The landscape flush streams the frame in several chunks and waits for
+    // each one itself, so the per-transfer IRQ must stay off.
+    channel_config_set_dreq(&c, pio_get_dreq(qspi.pio, qspi.sm, true));
+#else
     dma_channel_set_irq0_enabled(dma_tx, true);
     irq_set_exclusive_handler(DMA_IRQ_0, dma_handler);
     irq_set_enabled(DMA_IRQ_0, true);
+#endif
 }
 
 /********************************************************************************
@@ -276,6 +282,64 @@ void Widgets_Init(void)
 function : Refresh image by transferring the color data to the SPI bus by DMA
 parameter:
 ********************************************************************************/
+#if DISP_LANDSCAPE
+/*
+ * LVGL renders a 640x172 frame. The panel only scans 172x640, so each frame is
+ * rotated into small ping-pong buffers of panel rows: one is filled while DMA
+ * sends the other. This avoids a second full-size (220 KB) frame buffer.
+ */
+#define ROT_CHUNK_ROWS 32
+static lv_color_t rot_buf[2][ROT_CHUNK_ROWS * LCD_PHYS_W];
+
+static void rotate_rows(const lv_color_t *src, lv_color_t *dst, int py0, int rows)
+{
+    for (int r = 0; r < rows; r++) {
+        int py = py0 + r;
+        lv_color_t *d = dst + r * LCD_PHYS_W;
+#if DISP_ROTATION == 90
+        // panel (px, py) <- screen (x = py, y = W-1-px)
+        const lv_color_t *s = src + (LCD_PHYS_W - 1) * DISP_HOR_RES + py;
+        for (int px = 0; px < LCD_PHYS_W; px++) {
+            d[px] = *s;
+            s -= DISP_HOR_RES;
+        }
+#else
+        // panel (px, py) <- screen (x = H-1-py, y = px)
+        const lv_color_t *s = src + (LCD_PHYS_H - 1 - py);
+        for (int px = 0; px < LCD_PHYS_W; px++) {
+            d[px] = *s;
+            s += DISP_HOR_RES;
+        }
+#endif
+    }
+}
+
+static void disp_flush_cb(lv_disp_drv_t * disp, const lv_area_t * area, lv_color_t * color_p)
+{
+    // full_refresh is on, so area is always the whole screen
+    (void)area;
+    LCD_3IN49_SetWindows(0, 0, LCD_PHYS_W, LCD_PHYS_H);
+    QSPI_Select(qspi);
+    QSPI_Pixel_Write(qspi, 0x2c);
+
+    int b = 0;
+    for (int py = 0; py < LCD_PHYS_H; py += ROT_CHUNK_ROWS) {
+        int rows = LV_MIN(ROT_CHUNK_ROWS, LCD_PHYS_H - py);
+        rotate_rows(color_p, rot_buf[b], py, rows);
+        dma_channel_wait_for_finish_blocking(dma_tx);
+        dma_channel_configure(dma_tx,
+                              &c,
+                              &qspi.pio->txf[qspi.sm],
+                              rot_buf[b],
+                              rows * LCD_PHYS_W * sizeof(lv_color_t),
+                              true);
+        b ^= 1;
+    }
+    dma_channel_wait_for_finish_blocking(dma_tx);
+    QSPI_Deselect(qspi);
+    lv_disp_flush_ready(disp);
+}
+#else
 static void disp_flush_cb(lv_disp_drv_t * disp, const lv_area_t * area, lv_color_t * color_p)
 {
     // Send command in one-line mode
@@ -298,6 +362,7 @@ static void disp_flush_cb(lv_disp_drv_t * disp, const lv_area_t * area, lv_color
     // while(dma_channel_is_busy(dma_tx));
     // QSPI_Deselect(qspi);
 }
+#endif
 
 /********************************************************************************
 function : Touch interrupt handler
@@ -320,8 +385,21 @@ parameter:
 ********************************************************************************/
 static void ts_read_cb(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
+#if DISP_LANDSCAPE
+    // ts_x/ts_y are panel (portrait) coordinates
+    lv_coord_t px = LV_MIN(ts_x, LCD_PHYS_W - 1);
+    lv_coord_t py = LV_MIN(ts_y, LCD_PHYS_H - 1);
+#if DISP_ROTATION == 90
+    data->point.x = py;
+    data->point.y = LCD_PHYS_W - 1 - px;
+#else
+    data->point.x = LCD_PHYS_H - 1 - py;
+    data->point.y = px;
+#endif
+#else
     data->point.x = ts_x;
     data->point.y = ts_y;
+#endif
     data->state = ts_act;
     ts_act = LV_INDEV_STATE_RELEASED;
 }
@@ -347,6 +425,10 @@ parameter:
 static bool update_check(lv_obj_t *tv,lv_obj_t *tilex)
 {
     uint8_t ret = true;
+
+    // The demo tiles only exist if Widgets_Init() was called
+    if (tv == NULL)
+        return false;
 
     lv_obj_t *active_tile = lv_tileview_get_tile_act(tv); // Get the current active interface
     if (active_tile != tilex)

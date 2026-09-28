@@ -1,6 +1,104 @@
 # RP2350Touch3.49-Exp
 Example Project
 
+## Claude usage display
+
+The firmware shows your Claude usage on the 3.49" screen in landscape (640×172):
+
+- **Left:** the current 5-hour window as an arc (green < 60%, orange < 85%,
+  red above), with the time until it resets.
+- **Middle:** weekly limit bars (all models, plus a per-model limit if your plan
+  has one), and today's messages, tokens and API-equivalent cost.
+- **Right:** tokens per hour over the last 12 hours, the model you used last,
+  the recent burn rate, and the Mac's clock. The dot beside the clock is green
+  while updates are arriving, amber once they stop for 2 minutes.
+
+Tap the screen to cycle the backlight brightness.
+
+### How the data gets there
+
+The board has no Wi-Fi or Bluetooth radio, so the Mac sends the numbers over the
+same USB cable that powers it (USB CDC serial, `/dev/cu.usbmodem*`). No drivers
+are needed.
+
+`tools/claude_usage_host.py` runs on the Mac. It only needs the Python 3
+standard library:
+
+```sh
+python3 tools/claude_usage_host.py            # finds the board and updates it every 15 s
+python3 tools/claude_usage_host.py --print    # dry run: print what it would send
+python3 tools/claude_usage_host.py --demo     # random numbers, to test the screen
+```
+
+It reads two things:
+
+1. **Claude Code's local logs**, `~/.claude/projects/**/*.jsonl` (also
+   `~/.config/claude/projects` and `$CLAUDE_CONFIG_DIR`). Each assistant message
+   there records its token usage, which gives the totals, the hourly history and
+   the burn rate. Cost is estimated from list API prices. It isn't what a Pro or
+   Max subscription charges you.
+2. **Your plan limits**: the same 5-hour and weekly percentages that Claude
+   Code's `/usage` shows. These come from an unofficial endpoint
+   (`api.anthropic.com/api/oauth/usage`), using the OAuth token Claude Code keeps
+   in the macOS keychain (`Claude Code-credentials`). The first time, macOS asks
+   whether `security` may read that keychain item. The script only reads the
+   token and never refreshes it. If the token is missing or expired (Claude Code
+   renews it while you use it), or you pass `--no-limits`, the arc shows an
+   estimate instead, labelled `5-HOUR est.`. The estimate compares the current
+   window's cost with your busiest earlier window, or with `--block-limit USD`.
+
+Only Claude Code usage is in the logs. Chats on claude.ai don't write local
+files, but they do count towards the plan-limit percentages.
+
+To start it automatically at login, save this as
+`~/Library/LaunchAgents/com.claude-usage.display.plist` (fix the path), then
+run `launchctl load ~/Library/LaunchAgents/com.claude-usage.display.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.claude-usage.display</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/python3</string>
+    <string>/path/to/RP2350Touch3.49/tools/claude_usage_host.py</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
+
+### Serial protocol
+
+One line per message, newline terminated:
+
+| Direction | Line | Reply |
+|---|---|---|
+| Mac → board | `@PING` | `@PONG claude-usage 1` (used to find the port) |
+| Mac → board | `@CU key=value;key=value;...` | `@OK` |
+
+| Key | Meaning |
+|---|---|
+| `sp`, `sr` | 5-hour window: percent used, minutes until reset (`-1` = unknown) |
+| `wp`, `wr` | Weekly limit: percent used, minutes until reset |
+| `w2p`, `w2l` | Per-model weekly limit: percent, label (e.g. `SONNET`) |
+| `tt`, `tc`, `tm` | Today: tokens, cost in US cents, messages |
+| `bt`, `br` | Tokens in the current 5-hour window, tokens per minute recently |
+| `h` | 12 comma-separated hourly token counts, oldest first |
+| `m`, `t`, `src` | Model name, Mac clock `HH:MM`, `o` = limits from the API / `l` = local estimate |
+
+The firmware side is `src/SerialLink.cpp` (parser) and `src/UsageScreen.cpp` (UI).
+
+### Landscape mode
+
+LVGL renders a 640×172 frame, and the flush callback in `port/lvgl/lv_port.c`
+rotates it into the panel's native 172×640 scan order. It fills two small
+32-row buffers in turn, rotating into one while DMA sends the other, so it
+doesn't need a second 220 KB frame buffer. Touch coordinates are rotated to
+match. `DISP_ROTATION` in `port/lvgl/lv_port.h` picks 90° or 270°; flip it if
+the picture is upside down for how you mount the board. `DISP_LANDSCAPE 0`
+restores the original portrait behaviour.
+
 ## Building
 
 ### 1. Install the Pico SDK
@@ -103,11 +201,14 @@ board-specific code lives outside it, in `port/lvgl/` and `lvgl.cmake`.
   - Montserrat 16/24/26/28/30 enabled, and `LV_FONT_DEFAULT` 14 → 24.
   - Monitor positions moved to `LV_ALIGN_LEFT_MID` / `LV_ALIGN_RIGHT_MID`.
 - **`port/lvgl/lv_port.c`** (`LVGL_Init()`) connects LVGL to the hardware. The
-  display is 172×640 (portrait):
-  - **Display:** one full-screen draw buffer with `full_refresh`. The flush
-    callback sets the LCD window, sends `0x2C` (RAMWR) over QSPI and starts a DMA
-    transfer into the PIO TX FIFO. The DMA IRQ deselects the chip and calls
-    `lv_disp_flush_ready()`, so flushing is asynchronous.
+  panel is 172×640 (portrait). LVGL sees it as 640×172 landscape by default
+  (see [Landscape mode](#landscape-mode)):
+  - **Display:** one full-screen draw buffer with `full_refresh`. In portrait
+    mode the flush callback sets the LCD window, sends `0x2C` (RAMWR) over QSPI
+    and starts a DMA transfer into the PIO TX FIFO. The DMA IRQ deselects the
+    chip and calls `lv_disp_flush_ready()`, so flushing is asynchronous. In
+    landscape mode the flush rotates and sends the frame in chunks and waits
+    for them to finish, so it is synchronous.
   - **Touch:** a GPIO falling-edge IRQ reads the touch controller and latches
     x/y. The LVGL pointer read callback reports one `PRESSED` and then `RELEASED`.
   - **Tick:** a 5 ms repeating timer calls `lv_tick_inc(5)`. This is the only
@@ -118,6 +219,9 @@ board-specific code lives outside it, in `port/lvgl/` and `lvgl.cmake`.
 - The draw buffer is now allocated as `DISP_HOR_RES * DISP_VER_RES *
   sizeof(lv_color_t)`. It was previously missing the `sizeof`, so at 16-bit color
   it was half the size LVGL was told it had.
+- `LCD_3in49.c` included `"LCD_3IN49.h"`, which only works on a case-insensitive
+  file system such as macOS's default. It now matches the file name, so the
+  project also builds on Linux.
 - The duplicate `lv_tick_inc()` timer in `main.cpp` was removed. With both timers
   running, LVGL's clock ran at about 2× real time.
 

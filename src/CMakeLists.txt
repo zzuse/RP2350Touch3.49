@@ -2,6 +2,8 @@
 add_executable(${NAME}
         main.cpp
         Widgets.cpp
+        UsageScreen.cpp
+        SerialLink.cpp
 
         )
 

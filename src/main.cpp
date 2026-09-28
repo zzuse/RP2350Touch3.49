@@ -13,7 +13,7 @@ extern "C"{
 #include "LCD_3in49.h"
 }
 
-#include "Widgets.h"
+#include "UsageScreen.h"
 
 
 void core1_entry() {
@@ -59,7 +59,7 @@ int main()
 	/*Init LCD*/
 	LCD_3IN49_Init();
 	DEV_SET_PWM(60);
-	LCD_3IN49_Clear(WHITE);
+	LCD_3IN49_Clear(BLACK);
 	/*Init RTC*/
 	PCF85063A_Init();
 	/*Init IMU*/
@@ -67,10 +67,9 @@ int main()
 	/*Init LVGL*/
 	LVGL_Init();
 
-    Widgets widgets;
-
-    printf("Pre Widgets\n");
-    widgets.init();
+    // Usage snapshots arrive over USB serial from tools/claude_usage_host.py
+    static UsageScreen usage;
+    usage.init();
     for(;;){
         lv_timer_handler();
         //printf("Loop\n");
