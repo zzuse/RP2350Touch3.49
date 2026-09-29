@@ -96,9 +96,30 @@ LVGL renders a 640×172 frame, and the flush callback in `port/lvgl/lv_port.c`
 rotates it into the panel's native 172×640 scan order. It fills two small
 32-row buffers in turn, rotating into one while DMA sends the other, so it
 doesn't need a second 220 KB frame buffer. Touch coordinates are rotated to
-match. `DISP_ROTATION` in `port/lvgl/lv_port.h` picks 90° or 270°; flip it if
-the picture is upside down for how you mount the board. `DISP_LANDSCAPE 0`
-restores the original portrait behaviour.
+match. `DISP_ROTATION` in `port/lvgl/lv_port.h` sets the rotation at boot, 90°
+or 270°. `DISP_LANDSCAPE 0` restores the original portrait behaviour.
+
+### Auto-rotation
+
+`src/AutoRotate.cpp` reads the QMI8658 accelerometer every 100 ms. When you turn
+the board over, the picture flips 180° to stay upright. The new orientation has
+to hold for 0.6 s first, so knocking or carrying the board doesn't flip it. The
+layout is landscape only, so standing the board up in portrait, or laying it
+flat, keeps whatever orientation it had. At boot the board starts in whichever
+landscape orientation it is held in.
+
+Where the IMU chip's axes point relative to the panel depends on how it sits on
+the board, so two settings in `src/AutoRotate.h` may need changing:
+
+- `IMU_SHORT_AXIS`: the accelerometer axis along the panel's short side (0 = X,
+  1 = Y). If the screen never flips, or flips when you stand the board up in
+  portrait, change it.
+- `IMU_FLIP`: set to 1 if the picture is upside down in both orientations.
+
+`python3 tools/claude_usage_host.py --imu` prints the live readings. The axis
+that swings between about +g and −g as you turn the board over is the short
+axis. The board also prints `@ROT 90` or `@ROT 270` each time it flips.
+`AUTO_ROTATE 0` turns the feature off.
 
 ## Building
 

@@ -14,6 +14,7 @@ extern "C"{
 }
 
 #include "UsageScreen.h"
+#include "AutoRotate.h"
 
 
 void core1_entry() {
@@ -70,6 +71,10 @@ int main()
     // Usage snapshots arrive over USB serial from tools/claude_usage_host.py
     static UsageScreen usage;
     usage.init();
+
+    // Flip the picture when the board is turned over
+    static AutoRotate autoRotate;
+    autoRotate.init();
     for(;;){
         lv_timer_handler();
         //printf("Loop\n");

@@ -23,6 +23,7 @@ Only the Python 3 standard library is needed.
     python3 tools/claude_usage_host.py             # auto-detect the board
     python3 tools/claude_usage_host.py --print     # dry run, print the lines
     python3 tools/claude_usage_host.py --demo      # fake data, to test the screen
+    python3 tools/claude_usage_host.py --imu       # live accelerometer readings
 """
 
 import argparse
@@ -415,7 +416,20 @@ def main():
     ap.add_argument("--print", action="store_true", help="print the lines instead of sending them")
     ap.add_argument("--once", action="store_true", help="send one update and exit")
     ap.add_argument("--demo", action="store_true", help="send random data")
+    ap.add_argument("--imu", action="store_true",
+                    help="print the board's accelerometer readings, to set IMU_SHORT_AXIS / IMU_FLIP")
     args = ap.parse_args()
+
+    if args.imu:
+        board = find_board(args.port)
+        if not board:
+            sys.exit("board not found")
+        log(f"connected to {board.port}; turn the board around, Ctrl-C to stop")
+        while True:
+            board.send("@IMU")
+            for l in board.read_lines(0.5):
+                if l.startswith(("@IMU", "@ROT")):
+                    print(l, flush=True)
 
     reader = LogReader()
     if not args.demo:
