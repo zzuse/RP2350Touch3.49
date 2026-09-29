@@ -1,7 +1,8 @@
-# RP2350Touch3.49-Exp
-Example Project
+# RP2350Touch3.49
 
-## Claude usage display
+![Waveshare RP2350 Touch LCD 3.49](docs/images/waveshare-rp2350-touch-3.49.jpg)
+
+## Claude Usage Display
 
 The firmware shows your Claude usage on the 3.49" screen in landscape (640×172):
 
@@ -316,7 +317,7 @@ restored from upstream.
 
 This project builds on the work of [Dr Jon Durrant](https://github.com/jondurrant),
 whose LVGL port and widget code for the Waveshare RP2350 Touch LCD 3.49 form the
-foundation of this example.
+foundation of this project.
 
 His port is in turn adapted from the LVGL demo and hardware drivers supplied by
 [Waveshare](https://www.waveshare.com) for the board: the LCD, touch, QSPI PIO and
