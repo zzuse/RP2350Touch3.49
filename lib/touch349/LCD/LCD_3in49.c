@@ -27,7 +27,7 @@
 # THE SOFTWARE.
 ******************************************************************************/
 #include "DEV_Config.h"
-#include "LCD_3IN49.h"
+#include "LCD_3in49.h"
 
 LCD_3IN49_ATTRIBUTES LCD_3IN49;
 
