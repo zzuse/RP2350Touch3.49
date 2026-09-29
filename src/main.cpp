@@ -14,13 +14,17 @@ extern "C"{
 }
 
 #include "UsageScreen.h"
+#include "AudioPlayer.h"
 
+// Shared by both cores: core 0 fills it from USB, core 1 plays it
+static AudioPlayer audio;
 
 void core1_entry() {
     static int press_time = 0;
     while(1)
     {
-        DEV_Delay_ms(5);
+        // Plays (or outputs silence for) 5 ms, paced by the codec's clock
+        audio.pump5ms();
         if(DEV_Digital_Read(SYS_OUT) == 0)
         {
             press_time++;
@@ -64,15 +68,18 @@ int main()
 	PCF85063A_Init();
 	/*Init IMU*/
 	QMI8658_init();
+	/*Init audio: ES8311 codec, MCLK and I2S output*/
+	audio.init();
 	/*Init LVGL*/
 	LVGL_Init();
 
-    // Usage snapshots arrive over USB serial from tools/claude_usage_host.py
-    static UsageScreen usage;
+    // Usage snapshots and streamed audio arrive over USB serial from
+    // tools/claude_usage_host.py
+    static UsageScreen usage(&audio);
     usage.init();
     for(;;){
         lv_timer_handler();
         //printf("Loop\n");
-        sleep_ms(5);
+        sleep_ms(1);
     }
 }

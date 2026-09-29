@@ -88,7 +88,55 @@ One line per message, newline terminated:
 | `h` | 12 comma-separated hourly token counts, oldest first |
 | `m`, `t`, `src` | Model name, Mac clock `HH:MM`, `o` = limits from the API / `l` = local estimate |
 
-The firmware side is `src/SerialLink.cpp` (parser) and `src/UsageScreen.cpp` (UI).
+Audio (see [Music from the Mac](#music-from-the-mac)) uses the same link. It is
+credit based: the Mac sends only as many bytes as the board last said it had
+free.
+
+| Direction | Line | Reply |
+|---|---|---|
+| Mac → board | `@PLAY dur=<seconds>;title=<text>` | `@AOK <free bytes>` |
+| Mac → board | `@A <n>`, then `n` bytes of raw PCM | `@AF <free bytes>` |
+| Mac → board | `@AQ` (ask for the free space again) | `@AF <free bytes>` |
+| Mac → board | `@AEND` (no more data for this track) | `@ADONE` once it has played out |
+| Mac → board | `@STOP`, `@VOL <0-100>` | none |
+| board → Mac | `@ANEXT` (the now-playing row was tapped) | |
+
+The firmware side is `src/SerialLink.cpp` (parser), `src/UsageScreen.cpp` (UI) and
+`src/AudioPlayer.cpp` (playback).
+
+### Music from the Mac
+
+The host script can play a folder of music through the board's speaker. The
+files stay on the Mac. It decodes each one to 24 kHz, 16-bit mono (the rate the
+ES8311 codec is clocked for) and streams it over the USB serial link, at 48 KB/s.
+
+```sh
+python3 tools/claude_usage_host.py --music ~/Music/Desk
+python3 tools/claude_usage_host.py --music ~/Music/Desk --shuffle --loop --volume 60
+python3 tools/claude_usage_host.py --music song1.mp3 song2.m4a
+```
+
+Usage updates carry on as normal while music plays. The footer of the right-hand
+card shows the track title, elapsed and total time and a progress bar. Tap it to
+skip to the next track.
+
+For decoding, the script uses `ffmpeg` if it is installed (`brew install
+ffmpeg`, any format). Otherwise it uses macOS's built-in `afconvert`, which
+handles MP3, AAC/M4A, ALAC, WAV, AIFF, CAF and FLAC. It decodes the whole track
+to a temporary file first, which takes a second or two before playback starts.
+Without either, only WAV files already in 24 kHz 16-bit mono play.
+
+How it works on the board:
+
+- Core 0 reads USB in bulk into a 32768-sample (1.4 s) ring buffer. The USB
+  receive buffer is raised from 64 bytes to 4 KB (`src/CMakeLists.txt`) so it
+  keeps up while LVGL is busy redrawing.
+- Core 1 feeds the I2S PIO, and `pio_sm_put_blocking()` paces it at the codec's
+  sample rate. Between chunks of 5 ms it still does the power-button check it
+  did before.
+- Playback starts once 0.5 s is buffered. If the buffer runs dry, it plays
+  silence until data arrives. The speaker amplifier (`PA_CTRL`) is switched off
+  between tracks to avoid hiss.
 
 ### Landscape mode
 
@@ -230,7 +278,8 @@ board-specific code lives outside it, in `port/lvgl/` and `lvgl.cmake`.
 
 Drivers for the ES8311 audio codec and the micro SD card are taken from Waveshare's
 `02-ES8311` and `03-FatFs` demos for this board. Both are built and linked into the
-firmware, but the demo app doesn't use them yet.
+firmware. The audio is used for [music streamed from the Mac](#music-from-the-mac);
+the SD card isn't used yet.
 
 ### Audio (ES8311)
 
