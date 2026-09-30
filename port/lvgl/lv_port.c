@@ -291,27 +291,46 @@ parameter:
 #define ROT_CHUNK_ROWS 32
 static lv_color_t rot_buf[2][ROT_CHUNK_ROWS * LCD_PHYS_W];
 
-static void rotate_rows(const lv_color_t *src, lv_color_t *dst, int py0, int rows)
+// Current landscape rotation, 90 or 270. Only changed from the LVGL thread
+// (LVGL_SetRotation), and the flush runs on that thread too.
+static int disp_rotation = DISP_ROTATION;
+
+static void rotate_rows(const lv_color_t *src, lv_color_t *dst, int py0, int rows, int rotation)
 {
     for (int r = 0; r < rows; r++) {
         int py = py0 + r;
         lv_color_t *d = dst + r * LCD_PHYS_W;
-#if DISP_ROTATION == 90
-        // panel (px, py) <- screen (x = py, y = W-1-px)
-        const lv_color_t *s = src + (LCD_PHYS_W - 1) * DISP_HOR_RES + py;
-        for (int px = 0; px < LCD_PHYS_W; px++) {
-            d[px] = *s;
-            s -= DISP_HOR_RES;
+        if (rotation == 90) {
+            // panel (px, py) <- screen (x = py, y = W-1-px)
+            const lv_color_t *s = src + (LCD_PHYS_W - 1) * DISP_HOR_RES + py;
+            for (int px = 0; px < LCD_PHYS_W; px++) {
+                d[px] = *s;
+                s -= DISP_HOR_RES;
+            }
+        } else {
+            // panel (px, py) <- screen (x = H-1-py, y = px)
+            const lv_color_t *s = src + (LCD_PHYS_H - 1 - py);
+            for (int px = 0; px < LCD_PHYS_W; px++) {
+                d[px] = *s;
+                s += DISP_HOR_RES;
+            }
         }
-#else
-        // panel (px, py) <- screen (x = H-1-py, y = px)
-        const lv_color_t *s = src + (LCD_PHYS_H - 1 - py);
-        for (int px = 0; px < LCD_PHYS_W; px++) {
-            d[px] = *s;
-            s += DISP_HOR_RES;
-        }
-#endif
     }
+}
+
+void LVGL_SetRotation(int rotation)
+{
+    rotation = (rotation == 270) ? 270 : 90;
+    if (rotation == disp_rotation)
+        return;
+    disp_rotation = rotation;
+    // Nothing on screen changed, so ask LVGL to redraw it
+    lv_obj_invalidate(lv_scr_act());
+}
+
+int LVGL_GetRotation(void)
+{
+    return disp_rotation;
 }
 
 static void disp_flush_cb(lv_disp_drv_t * disp, const lv_area_t * area, lv_color_t * color_p)
@@ -322,10 +341,11 @@ static void disp_flush_cb(lv_disp_drv_t * disp, const lv_area_t * area, lv_color
     QSPI_Select(qspi);
     QSPI_Pixel_Write(qspi, 0x2c);
 
+    int rotation = disp_rotation;
     int b = 0;
     for (int py = 0; py < LCD_PHYS_H; py += ROT_CHUNK_ROWS) {
         int rows = LV_MIN(ROT_CHUNK_ROWS, LCD_PHYS_H - py);
-        rotate_rows(color_p, rot_buf[b], py, rows);
+        rotate_rows(color_p, rot_buf[b], py, rows, rotation);
         dma_channel_wait_for_finish_blocking(dma_tx);
         dma_channel_configure(dma_tx,
                               &c,
@@ -389,13 +409,13 @@ static void ts_read_cb(lv_indev_drv_t * drv, lv_indev_data_t*data)
     // ts_x/ts_y are panel (portrait) coordinates
     lv_coord_t px = LV_MIN(ts_x, LCD_PHYS_W - 1);
     lv_coord_t py = LV_MIN(ts_y, LCD_PHYS_H - 1);
-#if DISP_ROTATION == 90
-    data->point.x = py;
-    data->point.y = LCD_PHYS_W - 1 - px;
-#else
-    data->point.x = LCD_PHYS_H - 1 - py;
-    data->point.y = px;
-#endif
+    if (disp_rotation == 90) {
+        data->point.x = py;
+        data->point.y = LCD_PHYS_W - 1 - px;
+    } else {
+        data->point.x = LCD_PHYS_H - 1 - py;
+        data->point.y = px;
+    }
 #else
     data->point.x = ts_x;
     data->point.y = ts_y;

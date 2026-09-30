@@ -4,6 +4,7 @@ add_executable(${NAME}
         Widgets.cpp
         UsageScreen.cpp
         SerialLink.cpp
+        AutoRotate.cpp
 
         )
 

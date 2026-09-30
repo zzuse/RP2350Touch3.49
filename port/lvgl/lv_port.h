@@ -18,7 +18,8 @@
 #define DISP_LANDSCAPE 1
 #endif
 
-/* Landscape rotation, 90 or 270. Flip it if the picture is upside down. */
+/* Landscape rotation at boot, 90 or 270. With AUTO_ROTATE (src/AutoRotate.h)
+ * the IMU changes it at run time; otherwise flip it if the picture is upside down. */
 #ifndef DISP_ROTATION
 #define DISP_ROTATION 90
 #endif
@@ -34,5 +35,12 @@
 #define INPUTDEV_TS  1
 
 void LVGL_Init(void);
+
+#if DISP_LANDSCAPE
+/* Turn the landscape picture (and touch) to 90 or 270 degrees and redraw.
+ * Call from the LVGL thread. */
+void LVGL_SetRotation(int rotation);
+int LVGL_GetRotation(void);
+#endif
 
 #endif /* PORT_LVGL_LV_PORT_H_ */
