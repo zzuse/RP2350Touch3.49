@@ -79,6 +79,7 @@ void SerialLink::parseField(char *key, char *val, UsageData &d)
     else if (!strcmp(key, "m"))   copyStr(d.model, sizeof(d.model), val);
     else if (!strcmp(key, "t"))   copyStr(d.clock, sizeof(d.clock), val);
     else if (!strcmp(key, "src")) d.source = val[0];
+    else if (!strcmp(key, "st"))  copyStr(d.status, sizeof(d.status), val);
     else if (!strcmp(key, "h")) {
         int i = 0;
         char *p = val;

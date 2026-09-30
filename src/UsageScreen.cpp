@@ -355,13 +355,17 @@ void UsageScreen::refreshTimers()
         return;
     }
 
-    if (xData.sessionResetMin >= 0) {
+    if (xData.status[0]) {
+        // The Mac explains why the numbers are estimated or zero
+        snprintf(buf, sizeof(buf), "%s", xData.status);
+    } else if (xData.sessionResetMin >= 0) {
         fmtDuration(dur, sizeof(dur), LV_MAX(0, xData.sessionResetMin - elapsedMin));
         snprintf(buf, sizeof(buf), "resets in %s", dur);
     } else {
         snprintf(buf, sizeof(buf), "no active window");
     }
     lv_label_set_text(pSessReset, buf);
+    lv_obj_set_style_text_color(pSessReset, xData.status[0] ? COL_AMBER : COL_MUTED, 0);
 
     if (xData.weekResetMin >= 0) {
         fmtDuration(dur, sizeof(dur), LV_MAX(0, xData.weekResetMin - elapsedMin));
