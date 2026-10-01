@@ -4,12 +4,15 @@
     python3 tools/test_claude_usage_host.py
 """
 
+import builtins
+import io
 import json
 import os
 import signal
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 from datetime import date, datetime, timedelta, timezone
@@ -278,6 +281,85 @@ class DecoderTest(unittest.TestCase):
             with self.assertRaises(EOFError):
                 host.Decoder("/nonexistent/song.mp3")
         self.assertFalse(os.path.exists(made[0]))
+
+
+class LimitsTest(unittest.TestCase):
+    """Plan-limit failures must become LimitsError, so the display falls back
+    to the local estimate instead of crashing or showing stale limits."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.token = os.path.join(self.dir.name, "token")
+        with open(self.token, "w") as f:
+            f.write("tok")
+        # Only the token file: no env token, keychain or ~/.claude credentials
+        self.patches = [
+            mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": ""}),
+            mock.patch.object(host.platform, "system", return_value="Linux"),
+            mock.patch.object(host.os.path, "exists", return_value=False),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.dir.cleanup()
+
+    def reply(self, body):
+        return mock.patch.object(host.urllib.request, "urlopen", return_value=io.BytesIO(body))
+
+    def test_unreadable_token_file(self):
+        real_open = builtins.open
+
+        def deny(path, *a, **k):
+            if path == self.token:
+                raise PermissionError(13, "Permission denied", path)
+            return real_open(path, *a, **k)
+
+        with mock.patch("builtins.open", deny):
+            self.assertEqual(host.oauth_tokens(self.token), [])
+            with self.assertRaises(host.LimitsError):
+                host.fetch_limits(self.token)
+
+    def test_token_file_not_utf8(self):
+        with open(self.token, "wb") as f:
+            f.write(b"\xff\xfe bad")
+        self.assertEqual(host.oauth_tokens(self.token), [])
+
+    def test_malformed_replies(self):
+        for body in (b"<html>proxy login</html>", b"[]", b'"text"', b"null"):
+            with self.subTest(body=body), self.reply(body):
+                with self.assertRaises(host.LimitsError) as cm:
+                    host.fetch_limits(self.token)
+                self.assertEqual(cm.exception.short, "limits: bad reply")
+
+    def test_odd_fields_read_as_unknown(self):
+        body = json.dumps({"five_hour": {"utilization": "abc", "resets_at": 123},
+                           "seven_day": {"utilization": 7, "resets_at": "not a time"}}).encode()
+        with self.reply(body):
+            out = host.fetch_limits(self.token)
+        self.assertEqual((out["sp"], out["sr"], out["wp"], out["wr"]), (-1, -1, 7, -1))
+
+    def test_bad_reply_replaces_stale_limits(self):
+        args = types.SimpleNamespace(token_file=self.token, no_renew=True)
+        lim = {"data": {"src": "o", "sp": 40}, "at": 0.0, "err": None, "thread": "t"}
+        with self.reply(b"[]"):
+            host._fetch_limits_into(args, lim)
+        self.assertIsNone(lim["data"])
+        self.assertIsInstance(lim["err"], host.LimitsError)
+        self.assertIsNone(lim["thread"])
+
+    def test_check_reports_a_bad_reply_and_goes_on(self):
+        args = types.SimpleNamespace(no_limits=False, token_file=self.token, no_renew=True,
+                                     port=os.path.join(self.dir.name, "no-port"), block_limit=None)
+        reader = host.LogReader(host.History(None))
+        out = io.StringIO()
+        with self.reply(b"<html>"), mock.patch.object(host, "claude_dirs", return_value=[]), \
+                mock.patch("sys.stdout", out):
+            host.check(args, reader)
+        self.assertIn("failed: usage request returned something that isn't JSON", out.getvalue())
+        self.assertIn("Board:", out.getvalue())
 
 
 if __name__ == "__main__":

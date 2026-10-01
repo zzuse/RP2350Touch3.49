@@ -446,6 +446,21 @@ def history_stats(history, today=None):
 TOKEN_FILE = "~/.config/claude-usage-display/token"
 
 
+_unreadable = set()     # (path, error) already logged, so it isn't repeated every poll
+
+
+def _read_token_source(path):
+    """The file's text, or None if it can't be read (logged once)."""
+    try:
+        with open(path) as f:
+            return f.read()
+    except (OSError, ValueError) as e:     # ValueError: not UTF-8
+        if (path, str(e)) not in _unreadable:
+            _unreadable.add((path, str(e)))
+            log(f"can't read {path}, skipping it: {e}")
+        return None
+
+
 def oauth_tokens(token_file=TOKEN_FILE):
     """Every token we can find, best first, as (token, where it came from,
     whether it is Claude Code's own login, which Claude Code can renew)."""
@@ -455,8 +470,7 @@ def oauth_tokens(token_file=TOKEN_FILE):
         out.append((tok, "$CLAUDE_CODE_OAUTH_TOKEN", False))
     path = os.path.expanduser(token_file)
     if os.path.isfile(path):
-        with open(path) as f:
-            tok = f.read().strip()
+        tok = (_read_token_source(path) or "").strip()
         if tok:
             out.append((tok, path, False))
     blobs = []
@@ -471,8 +485,9 @@ def oauth_tokens(token_file=TOKEN_FILE):
             pass
     path = os.path.expanduser("~/.claude/.credentials.json")
     if os.path.exists(path):
-        with open(path) as f:
-            blobs.append((f.read(), path))
+        blob = _read_token_source(path)
+        if blob:
+            blobs.append((blob, path))
     for blob, where in blobs:
         try:
             out.append((json.loads(blob)["claudeAiOauth"]["accessToken"], where, True))
@@ -492,7 +507,7 @@ def minutes_until(iso):
         return -1
     try:
         return max(0, int((parse_ts(iso) - datetime.now(timezone.utc)).total_seconds() // 60))
-    except ValueError:
+    except (ValueError, TypeError, AttributeError):    # not an ISO time string
         return -1
 
 
@@ -529,7 +544,7 @@ def _first_working(tokens):
             rejected.append((429, where, login))
             continue
         try:
-            return _request_usage(tok), rejected
+            data = _request_usage(tok)
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 _retry_at[tok] = time.time() + _retry_after(e)
@@ -539,6 +554,13 @@ def _first_working(tokens):
             raise LimitsError(f"usage request failed: HTTP {e.code}", f"limits: HTTP {e.code}")
         except (urllib.error.URLError, OSError) as e:
             raise LimitsError(f"usage request failed: {e}", "limits: offline")
+        except ValueError as e:
+            # HTTP 200 but not JSON, e.g. a captive portal or proxy page
+            raise LimitsError(f"usage request returned something that isn't JSON: {e}",
+                              "limits: bad reply")
+        if not isinstance(data, dict):
+            raise LimitsError(f"unexpected usage response: {str(data)[:80]}", "limits: bad reply")
+        return data, rejected
     return None, rejected
 
 
@@ -624,7 +646,12 @@ def fetch_limits(token_file=TOKEN_FILE, renew=False):
         raise LimitsError(f"no token worked ({why}). {hint}", short)
 
     def pct(w):
-        return int(round(float(w.get("utilization") or 0))) if isinstance(w, dict) else -1
+        if not isinstance(w, dict):
+            return -1
+        try:
+            return int(round(float(w.get("utilization") or 0)))
+        except (TypeError, ValueError):
+            return -1
 
     out = {"src": "o"}
     five = data.get("five_hour")
@@ -1042,7 +1069,7 @@ def check(args, reader):
         try:
             lim = fetch_limits(args.token_file, renew=not args.no_renew)
             print(f"  OK: 5-hour {lim['sp']}%, weekly {lim['wp']}%")
-        except LimitsError as e:
+        except Exception as e:      # report it and go on to check the board
             print(f"  failed: {e}")
 
     print("Board:")
@@ -1071,7 +1098,9 @@ def _fetch_limits_into(args, lim):
         if lim["err"] is not None:
             log("plan limits OK")
         lim["data"], lim["err"] = data, None
-    except (LimitsError, ValueError) as e:
+    except Exception as e:
+        # Anything at all: an escaped error would kill this thread silently and
+        # leave the last good limits on screen as if they were current
         if lim["err"] is None or str(e) != str(lim["err"]):
             log(f"plan limits unavailable, using the local estimate: {e}")
         lim["err"], lim["data"] = e, None
