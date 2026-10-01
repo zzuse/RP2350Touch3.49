@@ -3,6 +3,11 @@
  */
 
 #include "SerialLink.h"
+#include "AutoRotate.h"
+
+extern "C" {
+#include "lv_port.h"
+}
 
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +49,18 @@ bool SerialLink::handleLine(char *line, UsageData &out)
 {
     if (strcmp(line, "@PING") == 0) {
         printf("@PONG claude-usage 1\n");
+        return false;
+    }
+    if (strcmp(line, "@IMU") == 0) {
+        // For setting IMU_SHORT_AXIS / IMU_FLIP in AutoRotate.h
+        float a[3];
+        AutoRotate::readAccel(a);
+#if DISP_LANDSCAPE
+        int rot = LVGL_GetRotation();
+#else
+        int rot = 0;
+#endif
+        printf("@IMU x=%.2f y=%.2f z=%.2f rot=%d\n", a[0], a[1], a[2], rot);
         return false;
     }
     if (strncmp(line, "@CU ", 4) != 0)
