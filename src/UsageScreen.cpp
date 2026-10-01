@@ -58,9 +58,11 @@ void UsageScreen::init()
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
+    xPager.init(2);
     buildSession();
     buildWeek();
     buildHistory();
+    buildStats();
 
     apply();
 
@@ -74,9 +76,9 @@ void UsageScreen::init()
     lv_timer_create(tickCB, 1000, this);
 }
 
-lv_obj_t *UsageScreen::makeCard(lv_coord_t x, lv_coord_t w)
+lv_obj_t *UsageScreen::makeCard(lv_obj_t *page, lv_coord_t x, lv_coord_t w)
 {
-    lv_obj_t *card = lv_obj_create(lv_scr_act());
+    lv_obj_t *card = lv_obj_create(page);
     lv_obj_remove_style_all(card);
     lv_obj_set_pos(card, x, PAD);
     lv_obj_set_size(card, w, CARD_H);
@@ -119,7 +121,7 @@ lv_obj_t *UsageScreen::makeBar(lv_obj_t *parent, lv_coord_t y)
 
 void UsageScreen::buildSession()
 {
-    lv_obj_t *card = makeCard(PAD, 172);
+    lv_obj_t *card = makeCard(xPager.page(0), PAD, 172);
 
     pArc = lv_arc_create(card);
     lv_obj_set_size(pArc, 128, 128);
@@ -150,7 +152,7 @@ void UsageScreen::buildSession()
 
 void UsageScreen::buildWeek()
 {
-    lv_obj_t *card = makeCard(PAD + 172 + PAD, 200);
+    lv_obj_t *card = makeCard(xPager.page(0), PAD + 172 + PAD, 200);
 
     lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "WEEKLY");
     lv_obj_set_pos(l, 12, 8);
@@ -181,7 +183,7 @@ void UsageScreen::buildWeek()
 void UsageScreen::buildHistory()
 {
     lv_coord_t x = PAD + 172 + PAD + 200 + PAD;
-    lv_obj_t *card = makeCard(x, 640 - x - PAD);
+    lv_obj_t *card = makeCard(xPager.page(0), x, 640 - x - PAD);
 
     lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "LAST 12 HOURS");
     lv_obj_set_pos(l, 12, 8);
@@ -259,6 +261,22 @@ void UsageScreen::buildHistory()
     lv_obj_align(pMusicTime, LV_ALIGN_TOP_RIGHT, -12, 5);
 }
 
+void UsageScreen::buildStats()
+{
+    // Placeholder until the stats page is built out
+    lv_obj_t *card = makeCard(xPager.page(1), PAD, 640 - 2 * PAD);
+
+    lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "UNDERSTAND YOUR CLAUDE USAGE");
+    lv_obj_set_pos(l, 16, 12);
+
+    l = makeLabel(card, &lv_font_montserrat_16, COL_TEXT, "Usage stats are coming soon");
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, -8);
+    l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED,
+                  "total tokens  " LV_SYMBOL_BULLET "  best day  " LV_SYMBOL_BULLET "  streaks  "
+                  LV_SYMBOL_BULLET "  longest task  " LV_SYMBOL_BULLET "  daily heatmap");
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, 20);
+}
+
 void UsageScreen::refreshMusic()
 {
     bool show = pAudio && pAudio->active();
@@ -320,12 +338,12 @@ void UsageScreen::onEdgeEnd(Edge edge)
 
 void UsageScreen::onSwipe(int dir)
 {
-    (void)dir;
+    xPager.slide(dir);
 }
 
 void UsageScreen::onTap(const lv_point_t &p)
 {
-    if (xShowingMusic) {
+    if (xShowingMusic && xPager.current() == 0) {
         lv_area_t a;
         lv_obj_get_coords(pMusicRow, &a);
         if (p.x >= a.x1 && p.x <= a.x2 && p.y >= a.y1 && p.y <= a.y2) {

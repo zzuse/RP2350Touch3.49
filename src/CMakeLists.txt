@@ -8,6 +8,7 @@ add_executable(${NAME}
         AutoRotate.cpp
         Gestures.cpp
         LevelControls.cpp
+        Pager.cpp
 
         )
 

@@ -1,7 +1,9 @@
 /*
  * UsageScreen.h
  *
- * Landscape (640x172) Claude usage dashboard.
+ * Landscape (640x172) Claude usage dashboard: page 0 below, page 1 for usage
+ * stats. Swipe the centre to change page; drag the left / right edge for
+ * brightness / volume.
  *
  *  +----------+--------------+------------------+
  *  |  (arc)   | WEEKLY  ===  | LAST 12 HOURS    |
@@ -19,6 +21,7 @@
 #include "AudioPlayer.h"
 #include "Gestures.h"
 #include "LevelControls.h"
+#include "Pager.h"
 
 class UsageScreen : public GestureListener {
 public:
@@ -39,13 +42,14 @@ private:
     static void tickCB(lv_timer_t *timer);
     static void arcAnimCB(void *arc, int32_t v);
 
-    lv_obj_t *makeCard(lv_coord_t x, lv_coord_t w);
+    lv_obj_t *makeCard(lv_obj_t *page, lv_coord_t x, lv_coord_t w);
     lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, lv_color_t color, const char *text);
     lv_obj_t *makeBar(lv_obj_t *parent, lv_coord_t y);
 
     void buildSession();
     void buildWeek();
     void buildHistory();
+    void buildStats();
 
     void apply();          // redraw everything from xData
     void refreshTimers();  // countdowns and the link indicator
@@ -56,6 +60,7 @@ private:
     SerialLink xLink;
     Gestures xGestures;
     LevelControls xLevels;
+    Pager xPager;
     bool xHaveData = false;
     uint32_t xRxMs = 0;
 
