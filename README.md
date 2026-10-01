@@ -43,29 +43,35 @@ It reads two things:
    (`api.anthropic.com/api/oauth/usage`) and need an OAuth token. The script
    looks for one in this order:
    - `$CLAUDE_CODE_OAUTH_TOKEN`
-   - the file `~/.config/claude-usage-display/token` (or `--token-file`)
+   - the file `~/.config/claude-usage-display/token` (or `--token-file`), for a
+     token you got some other way
    - the token Claude Code keeps in the macOS keychain (`Claude Code-credentials`)
      once you've logged in. The first time, macOS asks whether `security` may
      read it.
 
-   The script only reads tokens and never refreshes them. Without a working
-   token, or with `--no-limits`, the arc shows an estimate instead, labelled
-   `5-HOUR est.`. The estimate compares the current window's cost with your
-   busiest earlier window, or with `--block-limit USD`.
+   The script only reads tokens and never refreshes them itself. Without a
+   working token, or with `--no-limits`, the arc shows an estimate instead,
+   labelled `5-HOUR est.`. The estimate compares the current window's cost with
+   your busiest earlier window, or with `--block-limit USD`.
 
 Only Claude Code **running on this Mac** writes the logs. Usage in the Claude
 app, on claude.ai or in Claude Code on the web leaves nothing in `~/.claude`, so
 if that's where you use Claude, every local number stays at 0. Those sessions
-do count towards the plan limits, so for them you need a working token. The
-keychain token expires within hours unless Claude Code runs on the Mac and
-renews it. For a token that lasts, run `claude setup-token` (it needs Claude
-Code installed and a Claude subscription) and save what it prints:
+do count towards the plan limits, so for them you need a working token.
 
-```sh
-mkdir -p ~/.config/claude-usage-display
-pbpaste > ~/.config/claude-usage-display/token   # after copying the token
-chmod 600 ~/.config/claude-usage-display/token
-```
+The token that can read usage is the one Claude Code keeps in the keychain after
+you log in on this Mac (`claude auth login`). Tokens from `claude setup-token`
+are refused (403, or 429 "rate limited"): they can run Claude but not read
+account usage. The script tries every token it finds, in the order above, and
+uses the first that works.
+
+The keychain token expires within hours, and only Claude Code can renew it. When
+the script finds it expired, it runs `claude -p` with a one-word prompt on Haiku
+so that Claude Code renews it, then reads the new token. That costs a few Haiku
+tokens of your plan a few times a day, and needs `claude` on your `PATH`. Pass
+`--no-renew` to turn it off; then, while the token is expired, the arc shows
+the local estimate and the screen says `limits: token expired` until you run
+`claude` yourself. If the login has lapsed completely, run `claude auth login`.
 
 When numbers are estimated or missing, the host sends a short reason, and the
 board shows it in amber under the arc: `no usage data on Mac`,
