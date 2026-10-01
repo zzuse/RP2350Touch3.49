@@ -278,6 +278,8 @@ ninja install
 # or
 picotool load build/src/LVGL.uf2 -v
 picotool reboot
+# or USB direct flash
+picotool load -f -x build/src/LVGL.uf2
 ```
 
 The resulting firmware is at `build/src/LVGL.uf2` — copy it to the board while
@@ -373,6 +375,12 @@ Changes from Waveshare's code:
 - `Music_out()` and its `music.h` song data (about 18 MB of source) were left out.
   Use `tools/wav2data.py` to generate your own.
 - The `audio_pio.pio.h` header is generated at build time rather than checked in.
+- The I2S output program (`audio_pio` in `audio_pio.pio`) now lines up with
+  LRCLK's falling edge on every frame. Waveshare's did so once, at start-up, and
+  on about a third of boots came out a few bits off, which played as loud noise
+  instead of music until the next reboot. To make room for the wait, the right
+  channel's last bit is no longer sent; the codec is mono and plays the left.
+  The output FIFO is also 8 frames deep instead of 4.
 - `tools/wav2data.py`: fixed an unterminated string that stopped the script from
   running.
 

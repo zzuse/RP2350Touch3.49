@@ -6,28 +6,36 @@ wrap_target:
     nop
     jmp wrap_target
 
+; I2S output. The codec drives BCLK (gpio 4) and LRCLK (gpio 5). One 32-bit
+; word per frame: left sample in the high half, right in the low half.
+;
+; Every frame starts on LRCLK's falling edge. Waveshare's version waited for
+; that edge once, at start-up, and after that only for LRCLK's level. On about
+; a third of boots that one sync came out a few bits off and stayed that way:
+; loud noise instead of music, until reboot. A word arriving late (TX FIFO
+; empty) would do the same. Now either costs one frame and no more.
+;
+; The last bit of the right channel would go out on the edge itself, leaving no
+; time to wait for it, so it isn't sent. The codec is mono and plays the left.
 .program audio_pio;
+.wrap_target
     pull
     wait 1 gpio 5
-start:
-    pull
     wait 0 gpio 5
-    wait 1 gpio 4
-    set x, 15    
-left_loop: 
     wait 0 gpio 4
-    out pins, 1      
-    wait 1 gpio 4          
-    jmp x-- left_loop  
-    wait 1 gpio 5  
-    wait 1 gpio 4  
-    set x, 15        
+    wait 1 gpio 4
+    set x, 15
+left_loop:
+    wait 0 gpio 4
+    out pins, 1
+    wait 1 gpio 4
+    jmp x-- left_loop
+    set x, 14
 right_loop:
-    wait 0 gpio 4  
-    out pins, 1     
-    wait 1 gpio 4      
-    jmp x-- right_loop   
-    jmp start   
+    wait 0 gpio 4
+    out pins, 1
+    wait 1 gpio 4
+    jmp x-- right_loop
 .wrap
 
 .program read_pio;
@@ -73,6 +81,8 @@ static inline void audio_pio_program_init(PIO pio, uint sm, uint offset, uint da
     
     sm_config_set_out_pins(&sm_config, data_pin, 1);
     sm_config_set_out_shift(&sm_config, false, false, 32);
+    // 8 frames of slack (0.33 ms at 24 kHz) instead of 4 before the FIFO runs dry
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
 
     pio_sm_init(pio, sm, offset, &sm_config);
 
