@@ -7,7 +7,7 @@
  *   host -> board  "@PING"                    board answers "@PONG claude-usage 1"
  *   host -> board  "@CU key=value;key=value"  a usage snapshot, board answers "@OK"
  *
- * Keys: sp sr wp wr w2p w2l tt tc tm bt br h m t src (see UsageData.h and
+ * Keys: sp sr wp wr w2p w2l tt tc tm bt br h m t src st (see UsageData.h and
  * tools/claude_usage_host.py). Unknown keys are ignored.
  */
 

@@ -40,16 +40,47 @@ It reads two things:
    Max subscription charges you.
 2. **Your plan limits**: the same 5-hour and weekly percentages that Claude
    Code's `/usage` shows. These come from an unofficial endpoint
-   (`api.anthropic.com/api/oauth/usage`), using the OAuth token Claude Code keeps
-   in the macOS keychain (`Claude Code-credentials`). The first time, macOS asks
-   whether `security` may read that keychain item. The script only reads the
-   token and never refreshes it. If the token is missing or expired (Claude Code
-   renews it while you use it), or you pass `--no-limits`, the arc shows an
-   estimate instead, labelled `5-HOUR est.`. The estimate compares the current
-   window's cost with your busiest earlier window, or with `--block-limit USD`.
+   (`api.anthropic.com/api/oauth/usage`) and need an OAuth token. The script
+   looks for one in this order:
+   - `$CLAUDE_CODE_OAUTH_TOKEN`
+   - the file `~/.config/claude-usage-display/token` (or `--token-file`)
+   - the token Claude Code keeps in the macOS keychain (`Claude Code-credentials`)
+     once you've logged in. The first time, macOS asks whether `security` may
+     read it.
 
-Only Claude Code usage is in the logs. Chats on claude.ai don't write local
-files, but they do count towards the plan-limit percentages.
+   The script only reads tokens and never refreshes them. Without a working
+   token, or with `--no-limits`, the arc shows an estimate instead, labelled
+   `5-HOUR est.`. The estimate compares the current window's cost with your
+   busiest earlier window, or with `--block-limit USD`.
+
+Only Claude Code **running on this Mac** writes the logs. Usage in the Claude
+app, on claude.ai or in Claude Code on the web leaves nothing in `~/.claude`, so
+if that's where you use Claude, every local number stays at 0. Those sessions
+do count towards the plan limits, so for them you need a working token. The
+keychain token expires within hours unless Claude Code runs on the Mac and
+renews it. For a token that lasts, run `claude setup-token` (it needs Claude
+Code installed and a Claude subscription) and save what it prints:
+
+```sh
+mkdir -p ~/.config/claude-usage-display
+pbpaste > ~/.config/claude-usage-display/token   # after copying the token
+chmod 600 ~/.config/claude-usage-display/token
+```
+
+When numbers are estimated or missing, the host sends a short reason, and the
+board shows it in amber under the arc: `no usage data on Mac`,
+`limits: no token`, `limits: token expired` or `limits: no access`.
+
+To see what the script finds without starting it, run:
+
+```sh
+python3 tools/claude_usage_host.py --check
+```
+
+It lists the log folders and how many records they hold, where the token came
+from and whether the limits request works, and whether the board answers and
+acknowledges a test update. While running, the script also logs a one-line
+summary whenever the values it sends change.
 
 To start it automatically at login, save this as
 `~/Library/LaunchAgents/com.claude-usage.display.plist` (fix the path), then
@@ -87,6 +118,7 @@ One line per message, newline terminated:
 | `bt`, `br` | Tokens in the current 5-hour window, tokens per minute recently |
 | `h` | 12 comma-separated hourly token counts, oldest first |
 | `m`, `t`, `src` | Model name, Mac clock `HH:MM`, `o` = limits from the API / `l` = local estimate |
+| `st` | Short note shown under the arc when numbers are estimated or zero (empty when all is well) |
 
 The firmware side is `src/SerialLink.cpp` (parser) and `src/UsageScreen.cpp` (UI).
 

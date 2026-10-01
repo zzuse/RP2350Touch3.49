@@ -31,6 +31,7 @@ struct UsageData {
     char model[24] = "";
     char clock[8] = "";           // host local time, HH:MM
     char source = 'l';            // 'o' = limits from the Claude API, 'l' = local estimate
+    char status[24] = "";         // why the numbers are estimated or zero, e.g. "limits: token expired"
 };
 
 #endif /* SRC_USAGEDATA_H_ */
