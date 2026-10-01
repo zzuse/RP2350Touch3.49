@@ -60,6 +60,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 import tty
 import urllib.error
@@ -812,8 +813,27 @@ def check(args, reader):
         b.close()
 
 
+def _fetch_limits_into(args, lim):
+    try:
+        data = fetch_limits(args.token_file, renew=not args.no_renew)
+        if lim["err"] is not None:
+            log("plan limits OK")
+        lim["data"], lim["err"] = data, None
+    except (LimitsError, ValueError) as e:
+        if lim["err"] is None or str(e) != str(lim["err"]):
+            log(f"plan limits unavailable, using the local estimate: {e}")
+        lim["err"], lim["data"] = e, None
+    finally:
+        lim["thread"] = None
+
+
 def usage_fields(args, reader, lim):
-    """One usage snapshot. lim holds the plan-limit cache between calls."""
+    """One usage snapshot. lim holds the plan-limit cache between calls.
+
+    The plan limits are fetched on a background thread: the request, and
+    especially renewing the login with `claude -p`, can take many seconds, and
+    the main loop must keep feeding audio to the board meanwhile. Only the first
+    fetch is waited for, so the first update already has the limits."""
     if args.demo:
         return demo_fields()
     reader.scan()
@@ -821,17 +841,14 @@ def usage_fields(args, reader, lim):
     fields["src"] = "l"
     if args.no_limits:
         lim["err"] = LimitsError("disabled", "")
-    elif time.time() - lim["at"] >= args.limits_interval:
+    elif lim["thread"] is None and time.time() - lim["at"] >= args.limits_interval:
+        first = lim["at"] == 0.0
         lim["at"] = time.time()
-        try:
-            lim["data"] = fetch_limits(args.token_file, renew=not args.no_renew)
-            if lim["err"] is not None:
-                log("plan limits OK")
-            lim["err"] = None
-        except (LimitsError, ValueError) as e:
-            if lim["err"] is None or str(e) != str(lim["err"]):
-                log(f"plan limits unavailable, using the local estimate: {e}")
-            lim["err"], lim["data"] = e, None
+        t = threading.Thread(target=_fetch_limits_into, args=(args, lim), daemon=True)
+        lim["thread"] = t
+        t.start()
+        if first:
+            t.join(20)
     if lim["data"]:
         fields.update(lim["data"])
     st = status_text(reader.entries, lim["err"])
@@ -895,7 +912,7 @@ def main():
             log("note: only Claude Code running on this Mac writes these logs. Usage in the Claude app, "
                 "on claude.ai or in Claude Code on the web shows up only through the plan limits.")
 
-    lim = {"data": None, "at": 0.0, "err": None}
+    lim = {"data": None, "at": 0.0, "err": None, "thread": None}
 
     if args.print:
         while True:
@@ -909,6 +926,7 @@ def main():
     next_usage = 0.0
     last_summary = None
     ok_due = None           # when an @OK for the last update should have arrived
+    start_player = False
     warned_ack = False
 
     while True:
@@ -921,8 +939,7 @@ def main():
             log(f"connected to {board.port}")
             next_usage = 0.0
             last_summary = None
-            if player:
-                player.connected(board)
+            start_player = player is not None
         try:
             if time.time() >= next_usage:
                 fields = usage_fields(args, reader, lim)
@@ -936,6 +953,10 @@ def main():
                 if args.once:
                     board.read_lines(0.5)
                     return
+            if start_player:
+                # After the first update, which may wait for the plan limits
+                player.connected(board)
+                start_player = False
             streaming = player.pump(board) if player else False
             # Wait for the board's replies; briefly while audio is flowing
             wait = 0.005 if streaming else min(1.0, max(0.0, next_usage - time.time()))
