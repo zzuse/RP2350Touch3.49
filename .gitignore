@@ -45,3 +45,7 @@
 /lib/lvgl/Makefile
 /lib/lvgl/cmake_install.cmake
 build/
+
+# Python
+__pycache__/
+*.pyc
