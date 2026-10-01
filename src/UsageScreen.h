@@ -17,19 +17,27 @@
 #include "UsageData.h"
 #include "SerialLink.h"
 #include "AudioPlayer.h"
+#include "Gestures.h"
+#include "LevelControls.h"
 
-class UsageScreen {
+class UsageScreen : public GestureListener {
 public:
-    explicit UsageScreen(AudioPlayer *audio = nullptr) : xLink(audio), pAudio(audio) {}
+    explicit UsageScreen(AudioPlayer *audio = nullptr)
+        : xLink(audio), xGestures(this), xLevels(audio), pAudio(audio) {}
 
     void init();
+
+    // GestureListener
+    void onEdgeBegin(Edge edge) override;
+    void onEdgeDrag(Edge edge, lv_coord_t dy) override;
+    void onEdgeEnd(Edge edge) override;
+    void onSwipe(int dir) override;
+    void onTap(const lv_point_t &p) override;
 
 private:
     static void pollCB(lv_timer_t *timer);
     static void tickCB(lv_timer_t *timer);
-    static void clickCB(lv_event_t *e);
     static void arcAnimCB(void *arc, int32_t v);
-    static void musicClickCB(lv_event_t *e);
 
     lv_obj_t *makeCard(lv_coord_t x, lv_coord_t w);
     lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, lv_color_t color, const char *text);
@@ -46,9 +54,10 @@ private:
 
     UsageData xData;
     SerialLink xLink;
+    Gestures xGestures;
+    LevelControls xLevels;
     bool xHaveData = false;
     uint32_t xRxMs = 0;
-    int xBrightIdx = 2;
 
     // Session card
     lv_obj_t *pArc;

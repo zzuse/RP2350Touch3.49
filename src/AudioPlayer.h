@@ -34,6 +34,7 @@ public:
     void end();                                    // no more data for this track
     void stop();
     void setVolume(int volume);                    // 0-100
+    int volume() const { return xVolume; }
 
     size_t freeBytes() const;
     State state() const;
@@ -74,6 +75,7 @@ private:
     bool xHaveOdd = false;             // a sample split across two writes
     uint8_t xOdd = 0;
     char xTitle[48] = "";
+    int xVolume = 0;
     uint32_t xDuration = 0;
 };
 

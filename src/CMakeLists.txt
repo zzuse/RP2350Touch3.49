@@ -6,6 +6,8 @@ add_executable(${NAME}
         SerialLink.cpp
         AudioPlayer.cpp
         AutoRotate.cpp
+        Gestures.cpp
+        LevelControls.cpp
 
         )
 

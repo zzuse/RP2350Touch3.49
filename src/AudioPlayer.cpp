@@ -34,7 +34,8 @@ void AudioPlayer::init()
 {
     es8311_init(pico_audio);
     es8311_sample_frequency_config(pico_audio.mclk_freq, pico_audio.sample_freq);
-    es8311_voice_volume_set(pico_audio.volume);
+    xVolume = pico_audio.volume;
+    es8311_voice_volume_set(xVolume);
     mclk_pio_init();
     dout_pio_init();
 
@@ -143,6 +144,10 @@ void AudioPlayer::stop()
 
 void AudioPlayer::setVolume(int volume)
 {
+    volume = volume < 0 ? 0 : volume > 100 ? 100 : volume;
+    if (volume == xVolume)
+        return;
+    xVolume = volume;
     es8311_voice_volume_set(volume);
 }
 

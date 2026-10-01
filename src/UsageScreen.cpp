@@ -3,6 +3,7 @@
  */
 
 #include "UsageScreen.h"
+#include "Theme.h"
 
 #include <cstdio>
 #include <cstring>
@@ -11,20 +12,6 @@
 extern "C" {
 #include "DEV_Config.h"
 }
-
-// Palette: Anthropic's warm neutrals with the Claude orange as the accent
-#define COL_BG      lv_color_hex(0x0E0E0D)
-#define COL_CARD    lv_color_hex(0x1C1B19)
-#define COL_BORDER  lv_color_hex(0x2C2A27)
-#define COL_TRACK   lv_color_hex(0x34322E)
-#define COL_TEXT    lv_color_hex(0xF5F4EE)
-#define COL_MUTED   lv_color_hex(0x8E8B82)
-#define COL_ORANGE  lv_color_hex(0xD97757)
-#define COL_ODIM    lv_color_hex(0x6E3E2E)
-#define COL_GREEN   lv_color_hex(0x8FB573)
-#define COL_AMBER   lv_color_hex(0xE8A33D)
-#define COL_RED     lv_color_hex(0xE0564B)
-#define COL_BLUE    lv_color_hex(0x6A9BCC)
 
 #define SCREEN_H    172
 #define PAD         6
@@ -37,8 +24,6 @@ extern "C" {
 #define BAR_STEP    18
 
 #define STALE_MS    (120 * 1000)
-
-static const uint8_t kBrightness[] = {10, 30, 60, 100};
 
 static lv_color_t levelColor(int pct)
 {
@@ -72,14 +57,17 @@ void UsageScreen::init()
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(scr, clickCB, LV_EVENT_CLICKED, this);
 
     buildSession();
     buildWeek();
     buildHistory();
 
     apply();
-    DEV_SET_PWM(kBrightness[xBrightIdx]);
+
+    // All touches go to the screen, which sorts them into gestures and taps
+    Gestures::passThrough(scr);
+    xGestures.init();
+    xLevels.init();
 
     // Frequent polling keeps up with streamed audio (48 KB/s)
     lv_timer_create(pollCB, 5, this);
@@ -242,14 +230,14 @@ void UsageScreen::buildHistory()
     pBurn = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
     lv_obj_align(pBurn, LV_ALIGN_TOP_RIGHT, -12, 136);
 
-    // Now-playing row: hidden until audio streams. Tap it for the next track.
+    // Now-playing row: hidden until audio streams. Tap it for the next track
+    // (see onTap).
     pMusicRow = lv_obj_create(card);
     lv_obj_remove_style_all(pMusicRow);
     lv_obj_set_pos(pMusicRow, 0, 131);
     lv_obj_set_size(pMusicRow, 640 - x - PAD - 2, CARD_H - 131 - 2);
     lv_obj_clear_flag(pMusicRow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pMusicRow, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(pMusicRow, musicClickCB, LV_EVENT_CLICKED, this);
 
     pMusicBar = lv_bar_create(pMusicRow);
     lv_obj_remove_style_all(pMusicBar);
@@ -311,11 +299,40 @@ void UsageScreen::refreshMusic()
         lv_bar_set_value(pMusicBar, prog, LV_ANIM_OFF);
 }
 
-void UsageScreen::musicClickCB(lv_event_t *e)
+/* ------------------------------------------------------------------------- */
+
+void UsageScreen::onEdgeBegin(Edge edge)
 {
-    // The Mac owns the playlist; ask it for the next track
-    (void)e;
-    printf("@ANEXT\n");
+    xLevels.begin(edge == LEFT ? LevelControls::BRIGHTNESS : LevelControls::VOLUME);
+}
+
+void UsageScreen::onEdgeDrag(Edge edge, lv_coord_t dy)
+{
+    (void)edge;
+    xLevels.drag(dy);
+}
+
+void UsageScreen::onEdgeEnd(Edge edge)
+{
+    (void)edge;
+    xLevels.end();
+}
+
+void UsageScreen::onSwipe(int dir)
+{
+    (void)dir;
+}
+
+void UsageScreen::onTap(const lv_point_t &p)
+{
+    if (xShowingMusic) {
+        lv_area_t a;
+        lv_obj_get_coords(pMusicRow, &a);
+        if (p.x >= a.x1 && p.x <= a.x2 && p.y >= a.y1 && p.y <= a.y2) {
+            // The Mac owns the playlist; ask it for the next track
+            printf("@ANEXT\n");
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -477,11 +494,4 @@ void UsageScreen::tickCB(lv_timer_t *timer)
     UsageScreen *self = (UsageScreen *)timer->user_data;
     self->refreshTimers();
     self->refreshMusic();
-}
-
-void UsageScreen::clickCB(lv_event_t *e)
-{
-    UsageScreen *self = (UsageScreen *)lv_event_get_user_data(e);
-    self->xBrightIdx = (self->xBrightIdx + 1) % (int)sizeof(kBrightness);
-    DEV_SET_PWM(kBrightness[self->xBrightIdx]);
 }
