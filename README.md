@@ -43,7 +43,8 @@ It reads two things:
    (`api.anthropic.com/api/oauth/usage`) and need an OAuth token. The script
    looks for one in this order:
    - `$CLAUDE_CODE_OAUTH_TOKEN`
-   - the file `~/.config/claude-usage-display/token` (or `--token-file`)
+   - the file `~/.config/claude-usage-display/token` (or `--token-file`), for a
+     token you got some other way
    - the token Claude Code keeps in the macOS keychain (`Claude Code-credentials`)
      once you've logged in. The first time, macOS asks whether `security` may
      read it.
@@ -56,16 +57,15 @@ It reads two things:
 Only Claude Code **running on this Mac** writes the logs. Usage in the Claude
 app, on claude.ai or in Claude Code on the web leaves nothing in `~/.claude`, so
 if that's where you use Claude, every local number stays at 0. Those sessions
-do count towards the plan limits, so for them you need a working token. The
-keychain token expires within hours unless Claude Code runs on the Mac and
-renews it. For a token that lasts, run `claude setup-token` (it needs Claude
-Code installed and a Claude subscription) and save what it prints:
+do count towards the plan limits, so for them you need a working token.
 
-```sh
-mkdir -p ~/.config/claude-usage-display
-pbpaste > ~/.config/claude-usage-display/token   # after copying the token
-chmod 600 ~/.config/claude-usage-display/token
-```
+The token that can read usage is the one Claude Code keeps in the keychain after
+you log in on this Mac (`claude auth login`). Tokens from `claude setup-token`
+are refused (403): they can run Claude but not read account usage. The keychain
+token expires within hours, and only Claude Code renews it, so run `claude` on
+the Mac now and then. While it's expired, the arc shows the local estimate and
+the screen says `limits: token expired`. The script tries every token it
+finds, in the order above, and uses the first that works.
 
 When numbers are estimated or missing, the host sends a short reason, and the
 board shows it in amber under the arc: `no usage data on Mac`,

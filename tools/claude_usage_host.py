@@ -20,8 +20,9 @@ Two data sources, both on your Mac:
      - $CLAUDE_CODE_OAUTH_TOKEN
      - the file ~/.config/claude-usage-display/token (or --token-file)
      - the token Claude Code keeps in the macOS keychain after you log in
-   The keychain token expires after a few hours unless Claude Code runs and
-   renews it. `claude setup-token` makes a long-lived one to save in the file.
+   The first one that works is used. The keychain token expires after a few
+   hours unless Claude Code runs and renews it. Tokens from `claude setup-token`
+   can't read usage (403).
    Tokens are only read, never refreshed, so this can't log Claude Code out.
    Without a working token, the display falls back to an estimate from the
    local logs (shown as "5-HOUR est.").
@@ -258,39 +259,38 @@ def local_stats(entries, block_limit_usd=None):
 TOKEN_FILE = "~/.config/claude-usage-display/token"
 
 
-def oauth_token(token_file=TOKEN_FILE):
-    """Returns (token, where it came from), or (None, None)."""
+def oauth_tokens(token_file=TOKEN_FILE):
+    """Every token we can find, as (token, where it came from), best first."""
+    out = []
     tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     if tok:
-        return tok, "$CLAUDE_CODE_OAUTH_TOKEN"
+        out.append((tok, "$CLAUDE_CODE_OAUTH_TOKEN"))
     path = os.path.expanduser(token_file)
     if os.path.isfile(path):
         with open(path) as f:
             tok = f.read().strip()
         if tok:
-            return tok, path
-    blob = None
-    where = None
+            out.append((tok, path))
+    blobs = []
     if platform.system() == "Darwin":
         try:
             blob = subprocess.run(
                 ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
                 capture_output=True, text=True, timeout=10).stdout
-            where = "macOS keychain (Claude Code login)"
+            if blob:
+                blobs.append((blob, "macOS keychain (Claude Code login)"))
         except (OSError, subprocess.SubprocessError):
-            blob = None
-    if not blob:
-        path = os.path.expanduser("~/.claude/.credentials.json")
-        if os.path.exists(path):
-            with open(path) as f:
-                blob = f.read()
-            where = path
-    if not blob:
-        return None, None
-    try:
-        return json.loads(blob)["claudeAiOauth"]["accessToken"], where
-    except (ValueError, KeyError, TypeError):
-        return None, None
+            pass
+    path = os.path.expanduser("~/.claude/.credentials.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            blobs.append((f.read(), path))
+    for blob, where in blobs:
+        try:
+            out.append((json.loads(blob)["claudeAiOauth"]["accessToken"], where))
+        except (ValueError, KeyError, TypeError):
+            pass
+    return out
 
 
 class LimitsError(RuntimeError):
@@ -308,33 +308,47 @@ def minutes_until(iso):
         return -1
 
 
-def fetch_limits(token_file=TOKEN_FILE):
-    tok, where = oauth_token(token_file)
-    if not tok:
-        raise LimitsError(
-            "no OAuth token: log in to Claude Code on this Mac (run `claude`), or run "
-            f"`claude setup-token` and save the token in {TOKEN_FILE}", "limits: no token")
+def _request_usage(tok):
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": "Bearer " + tok,
         "anthropic-beta": "oauth-2025-04-20",
         "Content-Type": "application/json",
         "User-Agent": "claude-usage-display/1",
     })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.load(r)
-    except urllib.error.HTTPError as e:
-        if e.code == 401:
-            raise LimitsError(
-                f"the token from {where} was rejected (401), probably expired. Running `claude` "
-                f"renews the keychain one; `claude setup-token` makes a long-lived one for {TOKEN_FILE}",
-                "limits: token expired")
-        if e.code == 403:
-            raise LimitsError(f"the token from {where} isn't allowed to read usage (403)",
-                              "limits: no access")
-        raise LimitsError(f"usage request failed: HTTP {e.code}", f"limits: HTTP {e.code}")
-    except (urllib.error.URLError, OSError) as e:
-        raise LimitsError(f"usage request failed: {e}", "limits: offline")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)
+
+
+def fetch_limits(token_file=TOKEN_FILE):
+    tokens = oauth_tokens(token_file)
+    if not tokens:
+        raise LimitsError(
+            "no OAuth token: log in to Claude Code on this Mac (`claude auth login`)",
+            "limits: no token")
+    # A token that is expired (401) or can't read usage (403) falls through to
+    # the next source, e.g. a `claude setup-token` token to the keychain login.
+    rejected = []
+    data = None
+    for tok, where in tokens:
+        try:
+            data = _request_usage(tok)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                rejected.append((e.code, where))
+                continue
+            raise LimitsError(f"usage request failed: HTTP {e.code}", f"limits: HTTP {e.code}")
+        except (urllib.error.URLError, OSError) as e:
+            raise LimitsError(f"usage request failed: {e}", "limits: offline")
+    if data is None:
+        why = "; ".join(
+            f"{where}: {'expired (401)' if code == 401 else 'not allowed to read usage (403)'}"
+            for code, where in rejected)
+        hint = ("Log in to Claude Code on this Mac (`claude auth login`) and run `claude` now and "
+                "then: its keychain token is the one that can read usage, and it expires unless "
+                "Claude Code renews it. Tokens from `claude setup-token` can't read usage.")
+        short = "limits: token expired" if any(c == 401 for c, _ in rejected) else "limits: no access"
+        raise LimitsError(f"no token worked ({why}). {hint}", short)
 
     def pct(w):
         return int(round(float(w.get("utilization") or 0))) if isinstance(w, dict) else -1
@@ -500,8 +514,8 @@ def check(args, reader):
     if args.no_limits:
         print("  skipped (--no-limits)")
     else:
-        tok, where = oauth_token(args.token_file)
-        print(f"  token: {where or 'none found'}")
+        tokens = oauth_tokens(args.token_file)
+        print("  tokens: " + (", ".join(w for _, w in tokens) or "none found"))
         try:
             lim = fetch_limits(args.token_file)
             print(f"  OK: 5-hour {lim['sp']}%, weekly {lim['wp']}%")
