@@ -52,6 +52,7 @@ Only the Python 3 standard library is needed.
 """
 
 import argparse
+import atexit
 import glob
 import json
 import fcntl
@@ -60,6 +61,7 @@ import platform
 import random
 import select
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -296,7 +298,8 @@ class History:
     TASK_GAP, so a session left open overnight doesn't count as one long task."""
 
     def __init__(self, path=HISTORY_FILE):
-        self.path = os.path.expanduser(path) if path else None
+        # Absolute, so a bare file name has a directory to create and save into
+        self.path = os.path.abspath(os.path.expanduser(path)) if path else None
         self.saved = {}         # "YYYY-MM-DD" -> tokens, from the file
         self.days = {}          # "YYYY-MM-DD" -> tokens, read from the logs this run
         self.sessions = {}      # session -> [task start, last message]
@@ -443,17 +446,43 @@ def history_stats(history, today=None):
 TOKEN_FILE = "~/.config/claude-usage-display/token"
 
 
+_unreadable = set()     # (path, error) already logged, so it isn't repeated every poll
+
+
+def _read_token_source(path):
+    """The file's text, or None if it can't be read (logged once)."""
+    try:
+        with open(path) as f:
+            return f.read()
+    except (OSError, ValueError) as e:     # ValueError: not UTF-8
+        if (path, str(e)) not in _unreadable:
+            _unreadable.add((path, str(e)))
+            log(f"can't read {path}, skipping it: {e}")
+        return None
+
+
+def _usable_token(tok, where):
+    """tok without a leading BOM, or None if it can't go in an HTTP header
+    (logged once, without the token itself)."""
+    tok = tok.lstrip("\ufeff").strip()
+    if tok and tok.isascii() and tok.isprintable():
+        return tok
+    if tok and (where, "unusable") not in _unreadable:
+        _unreadable.add((where, "unusable"))
+        log(f"the token in {where} has line breaks or characters that can't go in a request; skipping it")
+    return None
+
+
 def oauth_tokens(token_file=TOKEN_FILE):
     """Every token we can find, best first, as (token, where it came from,
     whether it is Claude Code's own login, which Claude Code can renew)."""
     out = []
-    tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    tok = _usable_token(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", ""), "$CLAUDE_CODE_OAUTH_TOKEN")
     if tok:
         out.append((tok, "$CLAUDE_CODE_OAUTH_TOKEN", False))
     path = os.path.expanduser(token_file)
     if os.path.isfile(path):
-        with open(path) as f:
-            tok = f.read().strip()
+        tok = _usable_token(_read_token_source(path) or "", path)
         if tok:
             out.append((tok, path, False))
     blobs = []
@@ -468,13 +497,16 @@ def oauth_tokens(token_file=TOKEN_FILE):
             pass
     path = os.path.expanduser("~/.claude/.credentials.json")
     if os.path.exists(path):
-        with open(path) as f:
-            blobs.append((f.read(), path))
+        blob = _read_token_source(path)
+        if blob:
+            blobs.append((blob, path))
     for blob, where in blobs:
         try:
-            out.append((json.loads(blob)["claudeAiOauth"]["accessToken"], where, True))
-        except (ValueError, KeyError, TypeError):
-            pass
+            tok = _usable_token(json.loads(blob)["claudeAiOauth"]["accessToken"], where)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if tok:
+            out.append((tok, where, True))
     return out
 
 
@@ -489,7 +521,7 @@ def minutes_until(iso):
         return -1
     try:
         return max(0, int((parse_ts(iso) - datetime.now(timezone.utc)).total_seconds() // 60))
-    except ValueError:
+    except (ValueError, TypeError, AttributeError):    # not an ISO time string
         return -1
 
 
@@ -501,7 +533,12 @@ def _request_usage(tok):
         "User-Agent": "claude-usage-display/1",
     })
     with urllib.request.urlopen(req, timeout=15) as r:
-        return json.load(r)
+        try:
+            return json.load(r)
+        except ValueError as e:
+            # HTTP 200 but not JSON, e.g. a captive portal or proxy page
+            raise LimitsError(f"usage request returned something that isn't JSON: {e}",
+                              "limits: bad reply")
 
 
 _REJECTED = {401: "expired", 403: "not allowed to read usage", 429: "rate limited"}
@@ -526,7 +563,7 @@ def _first_working(tokens):
             rejected.append((429, where, login))
             continue
         try:
-            return _request_usage(tok), rejected
+            data = _request_usage(tok)
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 _retry_at[tok] = time.time() + _retry_after(e)
@@ -536,6 +573,9 @@ def _first_working(tokens):
             raise LimitsError(f"usage request failed: HTTP {e.code}", f"limits: HTTP {e.code}")
         except (urllib.error.URLError, OSError) as e:
             raise LimitsError(f"usage request failed: {e}", "limits: offline")
+        if not isinstance(data, dict):
+            raise LimitsError(f"unexpected usage response: {str(data)[:80]}", "limits: bad reply")
+        return data, rejected
     return None, rejected
 
 
@@ -621,7 +661,12 @@ def fetch_limits(token_file=TOKEN_FILE, renew=False):
         raise LimitsError(f"no token worked ({why}). {hint}", short)
 
     def pct(w):
-        return int(round(float(w.get("utilization") or 0))) if isinstance(w, dict) else -1
+        if not isinstance(w, dict):
+            return -1
+        try:
+            return int(round(float(w.get("utilization") or 0)))
+        except (TypeError, ValueError):
+            return -1
 
     out = {"src": "o"}
     five = data.get("five_hour")
@@ -740,12 +785,18 @@ class Decoder:
         self.wav = None
         self.tmp = None
         self.duration = 0
-        if shutil.which("ffmpeg"):
-            self._open_ffmpeg()
-        elif shutil.which("afconvert"):
-            self._open_afconvert()
-        else:
-            self._open_wav(path)
+        try:
+            if shutil.which("ffmpeg"):
+                self._open_ffmpeg()
+            elif shutil.which("afconvert"):
+                self._open_afconvert()
+            else:
+                self._open_wav(path)
+        except BaseException:
+            # The caller never gets this decoder to close, so remove the
+            # temporary WAV (and anything else opened) here
+            self.close()
+            raise
 
     def _open_ffmpeg(self):
         self.proc = subprocess.Popen(
@@ -788,13 +839,16 @@ class Decoder:
         if self.proc:
             self.proc.kill()
             self.proc.wait()
+            self.proc = None
         if self.wav:
             self.wav.close()
+            self.wav = None
         if self.tmp:
             try:
                 os.unlink(self.tmp)
             except OSError:
                 pass
+            self.tmp = None
 
 
 def collect_tracks(paths):
@@ -824,6 +878,7 @@ class Player:
         self.credit = 0
         self.waiting = False        # sent something, waiting for the board's @AF
         self.waiting_since = 0.0
+        self.pass_played = False    # some track in this pass over the playlist made sound
         self._refill()
         if not self.queue:
             log(f"no audio files found in {', '.join(paths)}")
@@ -834,6 +889,7 @@ class Player:
         if self.shuffle:
             random.shuffle(tracks)
         self.queue = tracks
+        self.pass_played = False
 
     def _close(self):
         if self.dec:
@@ -861,13 +917,22 @@ class Player:
                     log("playlist finished")
                     self.state = "finished"
                     return
+                if not self.pass_played:
+                    # A whole pass over the playlist produced no audio: every
+                    # file failed to open, or (with ffmpeg) decoded to nothing.
+                    # Going round again would never end.
+                    log("no playable tracks in the playlist, stopping the music")
+                    self.state = "finished"
+                    return
                 self._refill()
+                continue
             path = self.queue.pop(0)
             try:
                 self.dec = Decoder(path)
                 break
-            except (OSError, RuntimeError, wave.Error, subprocess.SubprocessError) as e:
-                log(f"skipping {os.path.basename(path)}: {e}")
+            except (OSError, EOFError, RuntimeError, wave.Error, subprocess.SubprocessError) as e:
+                # EOFError: wave.open on an empty or truncated file
+                log(f"skipping {os.path.basename(path)}: {str(e) or type(e).__name__}")
         title = os.path.splitext(os.path.basename(path))[0]
         clean = title.replace(";", ",").replace("\n", " ")[:46]
         dur = self.dec.duration
@@ -899,6 +964,7 @@ class Player:
             if time.time() - self.waiting_since > 3:
                 if self.state == "starting":
                     log("the board didn't answer @PLAY; is its firmware up to date?")
+                    self._close()
                     self.state = "finished"
                     return False
                 self._expect(board, "@AQ")     # a reply got lost, ask again
@@ -907,6 +973,7 @@ class Player:
             n = min(CHUNK, self.credit) & ~1
             data = self.dec.read(n)
             if data:
+                self.pass_played = True
                 self.credit -= len(data)
                 self._expect(board, f"@A {len(data)}\n".encode() + data)
             else:
@@ -1017,7 +1084,7 @@ def check(args, reader):
         try:
             lim = fetch_limits(args.token_file, renew=not args.no_renew)
             print(f"  OK: 5-hour {lim['sp']}%, weekly {lim['wp']}%")
-        except LimitsError as e:
+        except Exception as e:      # report it and go on to check the board
             print(f"  failed: {e}")
 
     print("Board:")
@@ -1046,7 +1113,9 @@ def _fetch_limits_into(args, lim):
         if lim["err"] is not None:
             log("plan limits OK")
         lim["data"], lim["err"] = data, None
-    except (LimitsError, ValueError) as e:
+    except Exception as e:
+        # Anything at all: an escaped error would kill this thread silently and
+        # leave the last good limits on screen as if they were current
         if lim["err"] is None or str(e) != str(lim["err"]):
             log(f"plan limits unavailable, using the local estimate: {e}")
         lim["err"], lim["data"] = e, None
@@ -1155,6 +1224,11 @@ def main():
             time.sleep(args.interval)
 
     player = Player(args.music, args.shuffle, args.loop, args.volume) if args.music else None
+    if player:
+        # Don't leave the current track's decoded temp WAV (or ffmpeg) behind
+        # on Ctrl-C, or when launchd or logging out stops the script
+        atexit.register(player._close)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     board = None
     next_usage = 0.0
     next_stats = 0.0

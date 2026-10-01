@@ -267,6 +267,8 @@ under the arc:
 | `limits: no access` | The token isn't allowed to read usage (a `claude setup-token` token) |
 | `limits: offline` | The request couldn't reach `api.anthropic.com` |
 | `limits: HTTP <code>` | The usage endpoint answered with another error |
+| `limits: bad reply` | The usage endpoint answered with something that isn't usage data, e.g. a proxy or Wi-Fi login page |
+| `limits: unavailable` | Any other failure fetching the limits |
 
 Run `python3 tools/claude_usage_host.py --check` for the full reason.
 
