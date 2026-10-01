@@ -6,9 +6,12 @@
 
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -123,6 +126,102 @@ class HistoryTest(unittest.TestCase):
         self.assertTrue(h.save())
         with open(self.path) as f:
             self.assertEqual(json.load(f)["version"], 1)
+
+
+class FakeBoard:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, line):
+        self.sent.append(line)
+
+
+class PlayerTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        # A hang would be the bug; fail instead of blocking the test run
+        signal.signal(signal.SIGALRM, lambda *_: self.fail("timed out"))
+        signal.alarm(5)
+
+    def tearDown(self):
+        signal.alarm(0)
+        self.dir.cleanup()
+
+    def track(self, name, data):
+        with open(os.path.join(self.dir.name, name), "wb") as f:
+            f.write(data)
+
+    def test_looping_playlist_with_no_playable_track_stops(self):
+        self.track("a.wav", b"not a wav file")
+        self.track("b.wav", b"")            # wave.open raises EOFError on this one
+        with mock.patch.object(host.shutil, "which", return_value=None):
+            player = host.Player([self.dir.name], loop=True)
+            board = FakeBoard()
+            player.next(board)
+        self.assertEqual(player.state, "finished")
+        self.assertEqual(board.sent, [])
+
+    def test_looping_playlist_whose_folder_empties_stops(self):
+        self.track("a.wav", b"not a wav file")
+        with mock.patch.object(host.shutil, "which", return_value=None):
+            player = host.Player([self.dir.name], loop=True)
+            os.unlink(os.path.join(self.dir.name, "a.wav"))
+            player.queue = []
+            player.next(FakeBoard())
+        self.assertEqual(player.state, "finished")
+
+    def test_looping_playlist_skips_bad_tracks(self):
+        import wave
+        self.track("a.wav", b"not a wav file")
+        with wave.open(os.path.join(self.dir.name, "b.wav"), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(host.AUDIO_RATE)
+            w.writeframes(b"\0\0" * 100)
+        with mock.patch.object(host.shutil, "which", return_value=None):
+            player = host.Player([self.dir.name], loop=True)
+            board = FakeBoard()
+            player.next(board)
+            self.assertEqual(player.state, "starting")
+            self.assertTrue(board.sent[-1].startswith("@PLAY dur=0;title=b"))
+            player._close()
+
+
+class DecoderTest(unittest.TestCase):
+    def test_failed_afconvert_leaves_no_temp_file(self):
+        made = []
+        real_mkstemp = tempfile.mkstemp
+
+        def mkstemp(*a, **k):
+            fd, path = real_mkstemp(*a, **k)
+            made.append(path)
+            return fd, path
+
+        fail = subprocess.CalledProcessError(1, ["afconvert"])
+        with mock.patch.object(host.shutil, "which", side_effect=lambda c: "/usr/bin/afconvert" if c == "afconvert" else None), \
+             mock.patch.object(host.tempfile, "mkstemp", side_effect=mkstemp), \
+             mock.patch.object(host.subprocess, "run", side_effect=fail):
+            with self.assertRaises(subprocess.CalledProcessError):
+                host.Decoder("/nonexistent/song.mp3")
+        self.assertEqual(len(made), 1)
+        self.assertFalse(os.path.exists(made[0]))
+
+    def test_unreadable_afconvert_output_leaves_no_temp_file(self):
+        made = []
+        real_mkstemp = tempfile.mkstemp
+
+        def mkstemp(*a, **k):
+            fd, path = real_mkstemp(*a, **k)
+            made.append(path)
+            return fd, path
+
+        # afconvert "succeeds" but leaves the output empty
+        with mock.patch.object(host.shutil, "which", side_effect=lambda c: "/usr/bin/afconvert" if c == "afconvert" else None), \
+             mock.patch.object(host.tempfile, "mkstemp", side_effect=mkstemp), \
+             mock.patch.object(host.subprocess, "run"):
+            with self.assertRaises(EOFError):
+                host.Decoder("/nonexistent/song.mp3")
+        self.assertFalse(os.path.exists(made[0]))
 
 
 if __name__ == "__main__":

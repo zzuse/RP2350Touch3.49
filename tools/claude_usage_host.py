@@ -741,12 +741,18 @@ class Decoder:
         self.wav = None
         self.tmp = None
         self.duration = 0
-        if shutil.which("ffmpeg"):
-            self._open_ffmpeg()
-        elif shutil.which("afconvert"):
-            self._open_afconvert()
-        else:
-            self._open_wav(path)
+        try:
+            if shutil.which("ffmpeg"):
+                self._open_ffmpeg()
+            elif shutil.which("afconvert"):
+                self._open_afconvert()
+            else:
+                self._open_wav(path)
+        except BaseException:
+            # The caller never gets this decoder to close, so remove the
+            # temporary WAV (and anything else opened) here
+            self.close()
+            raise
 
     def _open_ffmpeg(self):
         self.proc = subprocess.Popen(
@@ -789,13 +795,16 @@ class Decoder:
         if self.proc:
             self.proc.kill()
             self.proc.wait()
+            self.proc = None
         if self.wav:
             self.wav.close()
+            self.wav = None
         if self.tmp:
             try:
                 os.unlink(self.tmp)
             except OSError:
                 pass
+            self.tmp = None
 
 
 def collect_tracks(paths):
@@ -856,19 +865,29 @@ class Player:
 
     def next(self, board):
         self._close()
+        refilled = False
         while True:
             if not self.queue:
                 if not self.loop:
                     log("playlist finished")
                     self.state = "finished"
                     return
+                if refilled:
+                    # A whole pass over the playlist found nothing playable;
+                    # going round again would spin and starve the usage updates
+                    log("no playable tracks left in the playlist, stopping the music")
+                    self.state = "finished"
+                    return
                 self._refill()
+                refilled = True
+                continue
             path = self.queue.pop(0)
             try:
                 self.dec = Decoder(path)
                 break
-            except (OSError, RuntimeError, wave.Error, subprocess.SubprocessError) as e:
-                log(f"skipping {os.path.basename(path)}: {e}")
+            except (OSError, EOFError, RuntimeError, wave.Error, subprocess.SubprocessError) as e:
+                # EOFError: wave.open on an empty or truncated file
+                log(f"skipping {os.path.basename(path)}: {str(e) or type(e).__name__}")
         title = os.path.splitext(os.path.basename(path))[0]
         clean = title.replace(";", ",").replace("\n", " ")[:46]
         dur = self.dec.duration
