@@ -15,6 +15,7 @@ extern "C"{
 
 #include "UsageScreen.h"
 #include "AudioPlayer.h"
+#include "AutoRotate.h"
 
 // Shared by both cores: core 0 fills it from USB, core 1 plays it
 static AudioPlayer audio;
@@ -77,6 +78,10 @@ int main()
     // tools/claude_usage_host.py
     static UsageScreen usage(&audio);
     usage.init();
+
+    // Flip the picture when the board is turned over
+    static AutoRotate autoRotate;
+    autoRotate.init();
     for(;;){
         lv_timer_handler();
         //printf("Loop\n");

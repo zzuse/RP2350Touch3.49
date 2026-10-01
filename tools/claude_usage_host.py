@@ -10,12 +10,24 @@ Two data sources, both on your Mac:
    which gives today's tokens, API-equivalent cost, the hourly history, the
    current 5-hour window and the burn rate.
 
+   Only Claude Code running on this Mac writes these logs. Usage in the Claude
+   app, on claude.ai or in Claude Code on the web isn't recorded here.
+
 2. Your plan limits (optional, on by default)
    The same "5-hour" and "weekly" percentages that Claude Code's /usage shows.
-   They come from an unofficial endpoint, using the OAuth token Claude Code
-   keeps in the macOS keychain. The token is only read, never refreshed, so it
-   can't log Claude Code out. If it is missing or expired, the display falls
-   back to an estimate from the local logs (shown as "5-HOUR est.").
+   They cover all your usage, wherever it happened. They come from an
+   unofficial endpoint and need an OAuth token, looked up in this order:
+     - $CLAUDE_CODE_OAUTH_TOKEN
+     - the file ~/.config/claude-usage-display/token (or --token-file)
+     - the token Claude Code keeps in the macOS keychain after you log in
+   The first one that works is used. Tokens from `claude setup-token` can't
+   read usage (403 or 429).
+   The keychain token expires after a few hours, and only Claude Code can renew
+   it. When it has expired, this script runs `claude -p` with a one-word prompt
+   on Haiku so that Claude Code renews it (--no-renew turns that off). The
+   script itself only reads tokens, so it can't log Claude Code out.
+   Without a working token, the display falls back to an estimate from the
+   local logs (shown as "5-HOUR est.").
    Pass --no-limits to skip this entirely.
 
 It can also play music from a folder on the Mac through the board's speaker
@@ -29,17 +41,21 @@ Only the Python 3 standard library is needed.
     python3 tools/claude_usage_host.py             # auto-detect the board
     python3 tools/claude_usage_host.py --print     # dry run, print the lines
     python3 tools/claude_usage_host.py --demo      # fake data, to test the screen
+    python3 tools/claude_usage_host.py --check     # show what it finds, then exit
+    python3 tools/claude_usage_host.py --imu       # live accelerometer readings
     python3 tools/claude_usage_host.py --music ~/Music/Desk --shuffle --volume 60
 """
 
 import argparse
 import glob
 import json
+import fcntl
 import os
 import platform
 import random
 import select
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -252,29 +268,48 @@ def local_stats(entries, block_limit_usd=None):
 # Plan limits (optional)
 # --------------------------------------------------------------------------
 
-def oauth_token():
-    tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+TOKEN_FILE = "~/.config/claude-usage-display/token"
+
+
+def oauth_tokens(token_file=TOKEN_FILE):
+    """Every token we can find, best first, as (token, where it came from,
+    whether it is Claude Code's own login, which Claude Code can renew)."""
+    out = []
+    tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     if tok:
-        return tok
-    blob = None
+        out.append((tok, "$CLAUDE_CODE_OAUTH_TOKEN", False))
+    path = os.path.expanduser(token_file)
+    if os.path.isfile(path):
+        with open(path) as f:
+            tok = f.read().strip()
+        if tok:
+            out.append((tok, path, False))
+    blobs = []
     if platform.system() == "Darwin":
         try:
             blob = subprocess.run(
                 ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
                 capture_output=True, text=True, timeout=10).stdout
+            if blob:
+                blobs.append((blob, "macOS keychain (Claude Code login)"))
         except (OSError, subprocess.SubprocessError):
-            blob = None
-    if not blob:
-        path = os.path.expanduser("~/.claude/.credentials.json")
-        if os.path.exists(path):
-            with open(path) as f:
-                blob = f.read()
-    if not blob:
-        return None
-    try:
-        return json.loads(blob)["claudeAiOauth"]["accessToken"]
-    except (ValueError, KeyError, TypeError):
-        return None
+            pass
+    path = os.path.expanduser("~/.claude/.credentials.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            blobs.append((f.read(), path))
+    for blob, where in blobs:
+        try:
+            out.append((json.loads(blob)["claudeAiOauth"]["accessToken"], where, True))
+        except (ValueError, KeyError, TypeError):
+            pass
+    return out
+
+
+class LimitsError(RuntimeError):
+    def __init__(self, message, short):
+        super().__init__(message)
+        self.short = short      # fits on the board's screen
 
 
 def minutes_until(iso):
@@ -286,10 +321,7 @@ def minutes_until(iso):
         return -1
 
 
-def fetch_limits():
-    tok = oauth_token()
-    if not tok:
-        raise RuntimeError("no Claude Code OAuth token found (log in to Claude Code first)")
+def _request_usage(tok):
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": "Bearer " + tok,
         "anthropic-beta": "oauth-2025-04-20",
@@ -297,7 +329,97 @@ def fetch_limits():
         "User-Agent": "claude-usage-display/1",
     })
     with urllib.request.urlopen(req, timeout=15) as r:
-        data = json.load(r)
+        return json.load(r)
+
+
+_REJECTED = {401: "expired", 403: "not allowed to read usage", 429: "rate limited"}
+_retry_at = {}      # token -> when a 429 lets us ask again
+
+
+def _retry_after(err, default=300):
+    try:
+        return max(0, int(err.headers.get("Retry-After", default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_working(tokens):
+    """Usage from the first token that works (or None), and what the rest answered."""
+    # A token that is expired (401), can't read usage (403) or is rate limited
+    # (429) falls through to the next source, e.g. a `claude setup-token` token
+    # to the keychain login. The limit is per token, so the next one may work.
+    rejected = []
+    for tok, where, login in tokens:
+        if _retry_at.get(tok, 0) > time.time():
+            rejected.append((429, where, login))
+            continue
+        try:
+            return _request_usage(tok), rejected
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                _retry_at[tok] = time.time() + _retry_after(e)
+            if e.code in _REJECTED:
+                rejected.append((e.code, where, login))
+                continue
+            raise LimitsError(f"usage request failed: HTTP {e.code}", f"limits: HTTP {e.code}")
+        except (urllib.error.URLError, OSError) as e:
+            raise LimitsError(f"usage request failed: {e}", "limits: offline")
+    return None, rejected
+
+
+RENEW_EVERY = 600   # seconds between attempts, so a dead login doesn't cost a request every poll
+_renewed_at = 0.0
+
+
+def renew_login():
+    """Get Claude Code to renew its expired login by running one tiny request
+    through it. We never use the refresh token ourselves. True if it worked."""
+    global _renewed_at
+    if time.time() - _renewed_at < RENEW_EVERY:
+        return False
+    _renewed_at = time.time()
+    exe = shutil.which("claude")
+    if not exe:
+        log("can't renew the Claude Code login: `claude` isn't on PATH")
+        return False
+    # With one of these set, Claude Code would use it and leave its login alone.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    try:
+        r = subprocess.run(
+            [exe, "-p", "Reply with the single word: ok", "--model", "haiku", "--no-session-persistence"],
+            capture_output=True, text=True, timeout=60, env=env,
+            cwd=tempfile.gettempdir(), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"can't renew the Claude Code login: {e}")
+        return False
+    if r.returncode != 0:
+        why = (r.stdout + r.stderr).strip().splitlines()
+        log(f"can't renew the Claude Code login: {why[-1] if why else 'claude failed'}")
+        return False
+    log("Claude Code login had expired; renewed it by running `claude -p`")
+    return True
+
+
+def fetch_limits(token_file=TOKEN_FILE, renew=False):
+    tokens = oauth_tokens(token_file)
+    if not tokens:
+        raise LimitsError(
+            "no OAuth token: log in to Claude Code on this Mac (`claude auth login`)",
+            "limits: no token")
+    data, rejected = _first_working(tokens)
+    if (data is None and renew and any(code == 401 and login for code, _, login in rejected)
+            and renew_login()):
+        data, rejected = _first_working(oauth_tokens(token_file))
+    if data is None:
+        why = "; ".join(f"{where}: {_REJECTED[code]} ({code})" for code, where, _ in rejected)
+        hint = ("Log in to Claude Code on this Mac (`claude auth login`): its keychain token is "
+                "the one that can read usage, and it expires within hours unless Claude Code "
+                "renews it. Tokens from `claude setup-token` can't read usage.")
+        codes = {c for c, _, _ in rejected}
+        short = ("limits: token expired" if 401 in codes
+                 else "limits: rate limited" if 429 in codes else "limits: no access")
+        raise LimitsError(f"no token worked ({why}). {hint}", short)
 
     def pct(w):
         return int(round(float(w.get("utilization") or 0))) if isinstance(w, dict) else -1
@@ -336,6 +458,14 @@ class Board:
         attrs = termios.tcgetattr(self.fd)
         attrs[2] |= termios.CLOCAL      # USB CDC: no modem control lines
         termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
+        # The Pico's USB serial ignores input until the host raises DTR. Most
+        # systems do on open, but set it explicitly rather than rely on that.
+        try:
+            bis = getattr(termios, "TIOCMBIS", 0x8004746c if platform.system() == "Darwin" else 0x5416)
+            lines = getattr(termios, "TIOCM_DTR", 0x002) | getattr(termios, "TIOCM_RTS", 0x004)
+            fcntl.ioctl(self.fd, bis, struct.pack("I", lines))
+        except OSError:
+            pass
         self.rx = b""
 
     def close(self):
@@ -611,24 +741,102 @@ def demo_fields():
     }
 
 
+def status_text(entries, limits_err):
+    """A short note for the screen explaining zeros or estimates ("" when all is well)."""
+    if limits_err is None:
+        return ""
+    if not entries:
+        return "no usage data on Mac"
+    return limits_err.short if isinstance(limits_err, LimitsError) else "limits: unavailable"
+
+
+def summary(fields):
+    def pct(k):
+        v = fields.get(k, -1)
+        return f"{v}%" if isinstance(v, int) and v >= 0 else "--"
+    src = "plan limits" if fields.get("src") == "o" else "estimate"
+    s = (f"5h {pct('sp')} ({src}), week {pct('wp')}, today {fields.get('tt', 0):,} tokens / "
+         f"{fields.get('tm', 0)} msgs / ${fields.get('tc', 0) / 100:.2f}")
+    if fields.get("st"):
+        s += f"  [screen note: {fields['st']}]"
+    return s
+
+
+def check(args, reader):
+    """--check: report what the script can see, without starting the update loop."""
+    print("Claude Code logs:")
+    dirs = claude_dirs()
+    for d in dirs:
+        print(f"  {d}")
+    if not dirs:
+        print("  none found (~/.claude/projects, ~/.config/claude/projects)")
+    now = datetime.now().astimezone()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today = [e for e in reader.entries if e[0] >= midnight]
+    print(f"  {len(reader.entries)} usage records in the last 8 days, {len(today)} today")
+    if reader.entries:
+        print(f"  latest: {reader.entries[-1][0].astimezone():%Y-%m-%d %H:%M} ({pretty_model(reader.entries[-1][1])})")
+    else:
+        print("  Only Claude Code running on this Mac writes these; the Claude app, claude.ai")
+        print("  and Claude Code on the web don't.")
+
+    print("Plan limits:")
+    if args.no_limits:
+        print("  skipped (--no-limits)")
+    else:
+        tokens = oauth_tokens(args.token_file)
+        print("  tokens: " + (", ".join(w for _, w, _ in tokens) or "none found"))
+        try:
+            lim = fetch_limits(args.token_file, renew=not args.no_renew)
+            print(f"  OK: 5-hour {lim['sp']}%, weekly {lim['wp']}%")
+        except LimitsError as e:
+            print(f"  failed: {e}")
+
+    print("Board:")
+    ports = [args.port] if args.port else candidate_ports()
+    if not ports:
+        print("  no /dev/cu.usbmodem* port. Is it plugged in with a data cable and running the firmware?")
+    for p in ports:
+        try:
+            b = Board(p)
+        except OSError as e:
+            print(f"  {p}: can't open ({e}); is another program (serial monitor) using it?")
+            continue
+        ok = b.ping()
+        if ok:
+            b.send(encode(dict(local_stats(reader.entries, args.block_limit), src="l", t="--:--")))
+            acked = any(l == "@OK" for l in b.read_lines(1.0))
+            print(f"  {p}: answers @PING; test update {'acknowledged' if acked else 'NOT acknowledged'}")
+        else:
+            print(f"  {p}: no answer to @PING (different device, or older firmware)")
+        b.close()
+
+
 def usage_fields(args, reader, lim):
-    """lim is a dict holding the plan-limit cache between calls."""
+    """One usage snapshot. lim holds the plan-limit cache between calls."""
     if args.demo:
         return demo_fields()
     reader.scan()
     fields = local_stats(reader.entries, args.block_limit)
     fields["src"] = "l"
-    if not args.no_limits and time.time() - lim["at"] >= args.limits_interval:
+    if args.no_limits:
+        lim["err"] = LimitsError("disabled", "")
+    elif time.time() - lim["at"] >= args.limits_interval:
         lim["at"] = time.time()
         try:
-            lim["data"] = fetch_limits()
+            lim["data"] = fetch_limits(args.token_file, renew=not args.no_renew)
+            if lim["err"] is not None:
+                log("plan limits OK")
             lim["err"] = None
-        except (urllib.error.URLError, RuntimeError, ValueError, OSError) as e:
-            if str(e) != lim["err"]:
+        except (LimitsError, ValueError) as e:
+            if lim["err"] is None or str(e) != str(lim["err"]):
                 log(f"plan limits unavailable, using the local estimate: {e}")
-            lim["err"], lim["data"] = str(e), None
+            lim["err"], lim["data"] = e, None
     if lim["data"]:
         fields.update(lim["data"])
+    st = status_text(reader.entries, lim["err"])
+    if st:
+        fields["st"] = st
     fields["t"] = datetime.now().strftime("%H:%M")
     return fields
 
@@ -640,12 +848,19 @@ def main():
     ap.add_argument("--limits-interval", type=float, default=120,
                     help="seconds between plan-limit requests (default 120)")
     ap.add_argument("--no-limits", action="store_true", help="don't query plan limits, local logs only")
+    ap.add_argument("--no-renew", action="store_true",
+                    help="don't run `claude -p` to renew an expired Claude Code login")
+    ap.add_argument("--token-file", default=TOKEN_FILE,
+                    help=f"file holding an OAuth token for the plan limits (default {TOKEN_FILE})")
     ap.add_argument("--block-limit", type=float, metavar="USD",
                     help="for the local estimate: API-equivalent USD that counts as 100%% of a 5-hour window "
                          "(default: your busiest earlier window)")
     ap.add_argument("--print", action="store_true", help="print the lines instead of sending them")
     ap.add_argument("--once", action="store_true", help="send one update and exit")
     ap.add_argument("--demo", action="store_true", help="send random data")
+    ap.add_argument("--check", action="store_true", help="report the logs, token and board it finds, then exit")
+    ap.add_argument("--imu", action="store_true",
+                    help="print the board's accelerometer readings, to set IMU_SHORT_AXIS / IMU_FLIP")
     ap.add_argument("--music", nargs="+", metavar="PATH",
                     help="audio files or folders to play through the board's speaker")
     ap.add_argument("--shuffle", action="store_true", help="shuffle the --music playlist")
@@ -655,13 +870,30 @@ def main():
     if args.print and args.music:
         ap.error("--music needs the board, it can't be combined with --print")
 
+    if args.imu:
+        board = find_board(args.port)
+        if not board:
+            sys.exit("board not found")
+        log(f"connected to {board.port}; turn the board around, Ctrl-C to stop")
+        while True:
+            board.send("@IMU")
+            for l in board.read_lines(0.5):
+                if l.startswith(("@IMU", "@ROT")):
+                    print(l, flush=True)
+
     reader = LogReader()
     if not args.demo:
         dirs = claude_dirs()
+        n = reader.scan()
+        if args.check:
+            check(args, reader)
+            return
         if not dirs:
             log("warning: no Claude Code logs found in ~/.claude/projects or ~/.config/claude/projects")
-        n = reader.scan()
         log(f"read {n} usage records from {', '.join(dirs) or 'nowhere'}")
+        if n == 0:
+            log("note: only Claude Code running on this Mac writes these logs. Usage in the Claude app, "
+                "on claude.ai or in Claude Code on the web shows up only through the plan limits.")
 
     lim = {"data": None, "at": 0.0, "err": None}
 
@@ -675,6 +907,9 @@ def main():
     player = Player(args.music, args.shuffle, args.loop, args.volume) if args.music else None
     board = None
     next_usage = 0.0
+    last_summary = None
+    ok_due = None           # when an @OK for the last update should have arrived
+    warned_ack = False
 
     while True:
         if board is None:
@@ -685,21 +920,35 @@ def main():
                 continue
             log(f"connected to {board.port}")
             next_usage = 0.0
+            last_summary = None
             if player:
                 player.connected(board)
         try:
             if time.time() >= next_usage:
-                board.send(encode(usage_fields(args, reader, lim)))
+                fields = usage_fields(args, reader, lim)
+                board.send(encode(fields))
                 next_usage = time.time() + args.interval
+                ok_due = time.time() + 2
+                s = summary(fields)
+                if s != last_summary:
+                    log("sending " + s)
+                    last_summary = s
                 if args.once:
-                    board.read_lines(0.3)
+                    board.read_lines(0.5)
                     return
             streaming = player.pump(board) if player else False
             # Wait for the board's replies; briefly while audio is flowing
             wait = 0.005 if streaming else min(1.0, max(0.0, next_usage - time.time()))
             for line in board.read_lines(wait):
-                if player:
+                if line == "@OK":
+                    ok_due = None
+                elif player:
                     player.handle(board, line)
+            if ok_due and time.time() > ok_due:
+                ok_due = None
+                if not warned_ack:
+                    log("warning: the board didn't acknowledge the update (@OK). Is its firmware up to date?")
+                    warned_ack = True
         except OSError as e:
             log(f"lost the board: {e}")
             board.close()

@@ -40,16 +40,53 @@ It reads two things:
    Max subscription charges you.
 2. **Your plan limits**: the same 5-hour and weekly percentages that Claude
    Code's `/usage` shows. These come from an unofficial endpoint
-   (`api.anthropic.com/api/oauth/usage`), using the OAuth token Claude Code keeps
-   in the macOS keychain (`Claude Code-credentials`). The first time, macOS asks
-   whether `security` may read that keychain item. The script only reads the
-   token and never refreshes it. If the token is missing or expired (Claude Code
-   renews it while you use it), or you pass `--no-limits`, the arc shows an
-   estimate instead, labelled `5-HOUR est.`. The estimate compares the current
-   window's cost with your busiest earlier window, or with `--block-limit USD`.
+   (`api.anthropic.com/api/oauth/usage`) and need an OAuth token. The script
+   looks for one in this order:
+   - `$CLAUDE_CODE_OAUTH_TOKEN`
+   - the file `~/.config/claude-usage-display/token` (or `--token-file`), for a
+     token you got some other way
+   - the token Claude Code keeps in the macOS keychain (`Claude Code-credentials`)
+     once you've logged in. The first time, macOS asks whether `security` may
+     read it.
 
-Only Claude Code usage is in the logs. Chats on claude.ai don't write local
-files, but they do count towards the plan-limit percentages.
+   The script only reads tokens and never refreshes them itself. Without a
+   working token, or with `--no-limits`, the arc shows an estimate instead,
+   labelled `5-HOUR est.`. The estimate compares the current window's cost with
+   your busiest earlier window, or with `--block-limit USD`.
+
+Only Claude Code **running on this Mac** writes the logs. Usage in the Claude
+app, on claude.ai or in Claude Code on the web leaves nothing in `~/.claude`, so
+if that's where you use Claude, every local number stays at 0. Those sessions
+do count towards the plan limits, so for them you need a working token.
+
+The token that can read usage is the one Claude Code keeps in the keychain after
+you log in on this Mac (`claude auth login`). Tokens from `claude setup-token`
+are refused (403, or 429 "rate limited"): they can run Claude but not read
+account usage. The script tries every token it finds, in the order above, and
+uses the first that works.
+
+The keychain token expires within hours, and only Claude Code can renew it. When
+the script finds it expired, it runs `claude -p` with a one-word prompt on Haiku
+so that Claude Code renews it, then reads the new token. That costs a few Haiku
+tokens of your plan a few times a day, and needs `claude` on your `PATH`. Pass
+`--no-renew` to turn it off; then, while the token is expired, the arc shows
+the local estimate and the screen says `limits: token expired` until you run
+`claude` yourself. If the login has lapsed completely, run `claude auth login`.
+
+When numbers are estimated or missing, the host sends a short reason, and the
+board shows it in amber under the arc: `no usage data on Mac`,
+`limits: no token`, `limits: token expired` or `limits: no access`.
+
+To see what the script finds without starting it, run:
+
+```sh
+python3 tools/claude_usage_host.py --check
+```
+
+It lists the log folders and how many records they hold, where the token came
+from and whether the limits request works, and whether the board answers and
+acknowledges a test update. While running, the script also logs a one-line
+summary whenever the values it sends change.
 
 To start it automatically at login, save this as
 `~/Library/LaunchAgents/com.claude-usage.display.plist` (fix the path), then
@@ -87,6 +124,7 @@ One line per message, newline terminated:
 | `bt`, `br` | Tokens in the current 5-hour window, tokens per minute recently |
 | `h` | 12 comma-separated hourly token counts, oldest first |
 | `m`, `t`, `src` | Model name, Mac clock `HH:MM`, `o` = limits from the API / `l` = local estimate |
+| `st` | Short note shown under the arc when numbers are estimated or zero (empty when all is well) |
 
 Audio (see [Music from the Mac](#music-from-the-mac)) uses the same link. It is
 credit based: the Mac sends only as many bytes as the board last said it had
@@ -144,9 +182,30 @@ LVGL renders a 640×172 frame, and the flush callback in `port/lvgl/lv_port.c`
 rotates it into the panel's native 172×640 scan order. It fills two small
 32-row buffers in turn, rotating into one while DMA sends the other, so it
 doesn't need a second 220 KB frame buffer. Touch coordinates are rotated to
-match. `DISP_ROTATION` in `port/lvgl/lv_port.h` picks 90° or 270°; flip it if
-the picture is upside down for how you mount the board. `DISP_LANDSCAPE 0`
-restores the original portrait behaviour.
+match. `DISP_ROTATION` in `port/lvgl/lv_port.h` sets the rotation at boot, 90°
+or 270°. `DISP_LANDSCAPE 0` restores the original portrait behaviour.
+
+### Auto-rotation
+
+`src/AutoRotate.cpp` reads the QMI8658 accelerometer every 100 ms. When you turn
+the board over, the picture flips 180° to stay upright. The new orientation has
+to hold for 0.6 s first, so knocking or carrying the board doesn't flip it. The
+layout is landscape only, so standing the board up in portrait, or laying it
+flat, keeps whatever orientation it had. At boot the board starts in whichever
+landscape orientation it is held in.
+
+Where the IMU chip's axes point relative to the panel depends on how it sits on
+the board, so two settings in `src/AutoRotate.h` may need changing:
+
+- `IMU_SHORT_AXIS`: the accelerometer axis along the panel's short side (0 = X,
+  1 = Y). If the screen never flips, or flips when you stand the board up in
+  portrait, change it.
+- `IMU_FLIP`: set to 1 if the picture is upside down in both orientations.
+
+`python3 tools/claude_usage_host.py --imu` prints the live readings. The axis
+that swings between about +g and −g as you turn the board over is the short
+axis. The board also prints `@ROT 90` or `@ROT 270` each time it flips.
+`AUTO_ROTATE 0` turns the feature off.
 
 ## Building
 

@@ -5,6 +5,7 @@ add_executable(${NAME}
         UsageScreen.cpp
         SerialLink.cpp
         AudioPlayer.cpp
+        AutoRotate.cpp
 
         )
 

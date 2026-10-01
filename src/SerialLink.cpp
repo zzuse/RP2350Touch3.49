@@ -3,6 +3,11 @@
  */
 
 #include "SerialLink.h"
+#include "AutoRotate.h"
+
+extern "C" {
+#include "lv_port.h"
+}
 
 #include <cstdio>
 #include <cstdlib>
@@ -107,6 +112,18 @@ bool SerialLink::handleLine(char *line, UsageData &out)
         printf("@PONG claude-usage 1\n");
         return false;
     }
+    if (strcmp(line, "@IMU") == 0) {
+        // For setting IMU_SHORT_AXIS / IMU_FLIP in AutoRotate.h
+        float a[3];
+        AutoRotate::readAccel(a);
+#if DISP_LANDSCAPE
+        int rot = LVGL_GetRotation();
+#else
+        int rot = 0;
+#endif
+        printf("@IMU x=%.2f y=%.2f z=%.2f rot=%d\n", a[0], a[1], a[2], rot);
+        return false;
+    }
     if (!strncmp(line, "@A", 2) || !strncmp(line, "@PLAY", 5) ||
         !strcmp(line, "@STOP") || !strncmp(line, "@VOL ", 5)) {
         handleAudio(line);
@@ -145,6 +162,7 @@ void SerialLink::parseField(char *key, char *val, UsageData &d)
     else if (!strcmp(key, "m"))   copyStr(d.model, sizeof(d.model), val);
     else if (!strcmp(key, "t"))   copyStr(d.clock, sizeof(d.clock), val);
     else if (!strcmp(key, "src")) d.source = val[0];
+    else if (!strcmp(key, "st"))  copyStr(d.status, sizeof(d.status), val);
     else if (!strcmp(key, "h")) {
         int i = 0;
         char *p = val;
