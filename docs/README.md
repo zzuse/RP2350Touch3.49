@@ -108,6 +108,25 @@ One line per message, newline terminated:
 Unknown keys are ignored, so the host and the firmware can be updated
 separately.
 
+All-time stats for the stats page go in a separate line, sent on connect and
+then every 5 minutes. Current firmware ignores it until the stats page is built.
+
+| Direction | Line | Reply |
+|---|---|---|
+| Mac → board | `@CS key=value;key=value;...` | `@OK` (once the stats page exists) |
+
+| Key | Meaning |
+|---|---|
+| `tot`, `fd` | Total tokens, and the first day they cover (`YYYY-MM-DD`) |
+| `hd`, `hdt` | Highest day and its tokens |
+| `cs`, `ls` | Current and longest streak of days with usage |
+| `lt`, `ltd` | Longest task in minutes (a stretch of one session with no pause over 30 min), and its day |
+| `hm`, `hmax` | Heatmap: one digit 0-4 per day, from the Monday 15 weeks before this week's to today, to fill a 7-row grid column by column; tokens for level 4 |
+
+The Mac keeps these totals in `~/.config/claude-usage-display/history.json`
+(`--history-file`), because Claude Code deletes old logs after 30 days by
+default.
+
 Audio (see [Audio streaming](#audio-streaming)) uses the same link. It is
 credit based: the Mac sends only as many bytes as the board last said it had
 free.
