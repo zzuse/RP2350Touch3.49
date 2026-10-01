@@ -13,6 +13,7 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include "pico/stdlib.h"
+#include "lvgl.h"
 
 static void copyStr(char *dst, size_t size, const char *src)
 {
@@ -23,26 +24,86 @@ static void copyStr(char *dst, size_t size, const char *src)
 bool SerialLink::poll(UsageData &out)
 {
     bool got = false;
-    for (;;) {
-        int ch = getchar_timeout_us(0);
-        if (ch == PICO_ERROR_TIMEOUT || ch < 0)
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    // A chunk cut short (host stopped mid-write) must not swallow later lines
+    if (xBinLeft && now - xLastRxMs > 1000)
+        xBinLeft = 0;
+
+    if (xAudio && xAudio->state() == AudioPlayer::DONE) {
+        xAudio->stop();
+        printf("@ADONE\n");
+    }
+
+    // Read in bulk: audio arrives at 48 KB/s, too fast for getchar()
+    uint8_t rx[512];
+    for (int reads = 0; reads < 64; reads++) {
+        int n = stdio_get_until((char *)rx, sizeof(rx), get_absolute_time());
+        if (n <= 0)
             break;
-        if (ch == '\r')
-            continue;
-        if (ch == '\n') {
-            xBuf[xLen] = '\0';
-            if (!xOverflow && xLen > 0)
-                got |= handleLine(xBuf, out);
-            xLen = 0;
-            xOverflow = false;
-            continue;
+        xLastRxMs = now;
+        int i = 0;
+        while (i < n) {
+            if (xBinLeft) {
+                size_t take = LV_MIN((size_t)(n - i), xBinLeft);
+                if (xAudio)
+                    xAudio->write(rx + i, take);
+                i += take;
+                xBinLeft -= take;
+                if (xBinLeft == 0)
+                    printf("@AF %u\n", xAudio ? (unsigned)xAudio->freeBytes() : 0u);
+                continue;
+            }
+            char ch = (char)rx[i++];
+            if (ch == '\r')
+                continue;
+            if (ch == '\n') {
+                xBuf[xLen] = '\0';
+                if (!xOverflow && xLen > 0)
+                    got |= handleLine(xBuf, out);
+                xLen = 0;
+                xOverflow = false;
+                continue;
+            }
+            if (xLen < sizeof(xBuf) - 1)
+                xBuf[xLen++] = ch;
+            else
+                xOverflow = true;
         }
-        if (xLen < sizeof(xBuf) - 1)
-            xBuf[xLen++] = (char)ch;
-        else
-            xOverflow = true;
     }
     return got;
+}
+
+void SerialLink::handleAudio(char *line)
+{
+    if (!xAudio)
+        return;
+    if (!strncmp(line, "@A ", 3)) {
+        // Followed by that many bytes of raw PCM
+        xBinLeft = strtoul(line + 3, nullptr, 10);
+    } else if (!strcmp(line, "@AQ")) {
+        printf("@AF %u\n", (unsigned)xAudio->freeBytes());
+    } else if (!strncmp(line, "@PLAY", 5)) {
+        // @PLAY dur=<seconds>;title=<text>
+        char title[48] = "";
+        uint32_t dur = 0;
+        char *save = nullptr;
+        char *args = line[5] == ' ' ? line + 6 : line + 5;
+        for (char *tok = strtok_r(args, ";", &save); tok; tok = strtok_r(nullptr, ";", &save)) {
+            if (!strncmp(tok, "dur=", 4))
+                dur = strtoul(tok + 4, nullptr, 10);
+            else if (!strncmp(tok, "title=", 6))
+                copyStr(title, sizeof(title), tok + 6);
+        }
+        xAudio->start(title, dur);
+        printf("@AOK %u\n", (unsigned)xAudio->freeBytes());
+    } else if (!strcmp(line, "@AEND")) {
+        xAudio->end();
+    } else if (!strcmp(line, "@STOP")) {
+        xAudio->stop();
+    } else if (!strncmp(line, "@VOL ", 5)) {
+        xAudio->setVolume(atoi(line + 5));
+    }
 }
 
 bool SerialLink::handleLine(char *line, UsageData &out)
@@ -61,6 +122,11 @@ bool SerialLink::handleLine(char *line, UsageData &out)
         int rot = 0;
 #endif
         printf("@IMU x=%.2f y=%.2f z=%.2f rot=%d\n", a[0], a[1], a[2], rot);
+        return false;
+    }
+    if (!strncmp(line, "@A", 2) || !strncmp(line, "@PLAY", 5) ||
+        !strcmp(line, "@STOP") || !strncmp(line, "@VOL ", 5)) {
+        handleAudio(line);
         return false;
     }
     if (strncmp(line, "@CU ", 4) != 0)

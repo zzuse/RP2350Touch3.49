@@ -81,7 +81,8 @@ void UsageScreen::init()
     apply();
     DEV_SET_PWM(kBrightness[xBrightIdx]);
 
-    lv_timer_create(pollCB, 20, this);
+    // Frequent polling keeps up with streamed audio (48 KB/s)
+    lv_timer_create(pollCB, 5, this);
     lv_timer_create(tickCB, 1000, this);
 }
 
@@ -240,6 +241,81 @@ void UsageScreen::buildHistory()
 
     pBurn = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
     lv_obj_align(pBurn, LV_ALIGN_TOP_RIGHT, -12, 136);
+
+    // Now-playing row: hidden until audio streams. Tap it for the next track.
+    pMusicRow = lv_obj_create(card);
+    lv_obj_remove_style_all(pMusicRow);
+    lv_obj_set_pos(pMusicRow, 0, 131);
+    lv_obj_set_size(pMusicRow, 640 - x - PAD - 2, CARD_H - 131 - 2);
+    lv_obj_clear_flag(pMusicRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(pMusicRow, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(pMusicRow, musicClickCB, LV_EVENT_CLICKED, this);
+
+    pMusicBar = lv_bar_create(pMusicRow);
+    lv_obj_remove_style_all(pMusicBar);
+    lv_obj_set_pos(pMusicBar, 12, 0);
+    lv_obj_set_size(pMusicBar, 640 - x - PAD - 26, 3);
+    lv_obj_set_style_bg_color(pMusicBar, COL_TRACK, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(pMusicBar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(pMusicBar, COL_ORANGE, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(pMusicBar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_bar_set_range(pMusicBar, 0, 1000);
+    lv_obj_clear_flag(pMusicBar, LV_OBJ_FLAG_CLICKABLE);
+
+    pMusicTitle = makeLabel(pMusicRow, &lv_font_montserrat_14, COL_ORANGE, "");
+    lv_obj_set_pos(pMusicTitle, 12, 5);
+    lv_label_set_long_mode(pMusicTitle, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(pMusicTitle, 140);
+
+    pMusicTime = makeLabel(pMusicRow, &lv_font_montserrat_14, COL_MUTED, "");
+    lv_obj_align(pMusicTime, LV_ALIGN_TOP_RIGHT, -12, 5);
+}
+
+void UsageScreen::refreshMusic()
+{
+    bool show = pAudio && pAudio->active();
+    if (show != xShowingMusic) {
+        xShowingMusic = show;
+        if (show) {
+            lv_obj_add_flag(pModel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(pBurn, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(pMusicRow, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(pModel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(pBurn, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(pMusicRow, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (!show)
+        return;
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), LV_SYMBOL_AUDIO " %s", pAudio->title());
+    if (strcmp(lv_label_get_text(pMusicTitle), buf) != 0)
+        lv_label_set_text(pMusicTitle, buf);
+
+    uint32_t el = pAudio->elapsedSec();
+    uint32_t dur = pAudio->durationSec();
+    if (pAudio->state() == AudioPlayer::BUFFERING)
+        snprintf(buf, sizeof(buf), "buffering");
+    else if (dur)
+        snprintf(buf, sizeof(buf), "%u:%02u / %u:%02u",
+                 (unsigned)(el / 60), (unsigned)(el % 60), (unsigned)(dur / 60), (unsigned)(dur % 60));
+    else
+        snprintf(buf, sizeof(buf), "%u:%02u", (unsigned)(el / 60), (unsigned)(el % 60));
+    if (strcmp(lv_label_get_text(pMusicTime), buf) != 0)
+        lv_label_set_text(pMusicTime, buf);
+
+    int32_t prog = dur ? (int32_t)LV_MIN(1000u, el * 1000 / dur) : 0;
+    if (lv_bar_get_value(pMusicBar) != prog)
+        lv_bar_set_value(pMusicBar, prog, LV_ANIM_OFF);
+}
+
+void UsageScreen::musicClickCB(lv_event_t *e)
+{
+    // The Mac owns the playlist; ask it for the next track
+    (void)e;
+    printf("@ANEXT\n");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -391,11 +467,16 @@ void UsageScreen::pollCB(lv_timer_t *timer)
         self->xRxMs = to_ms_since_boot(get_absolute_time());
         self->apply();
     }
+    // Catch a track starting or stopping straight away; the time updates once a second
+    if (self->pAudio && self->pAudio->active() != self->xShowingMusic)
+        self->refreshMusic();
 }
 
 void UsageScreen::tickCB(lv_timer_t *timer)
 {
-    ((UsageScreen *)timer->user_data)->refreshTimers();
+    UsageScreen *self = (UsageScreen *)timer->user_data;
+    self->refreshTimers();
+    self->refreshMusic();
 }
 
 void UsageScreen::clickCB(lv_event_t *e)

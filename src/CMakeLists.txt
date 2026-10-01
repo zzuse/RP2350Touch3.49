@@ -4,6 +4,7 @@ add_executable(${NAME}
         Widgets.cpp
         UsageScreen.cpp
         SerialLink.cpp
+        AudioPlayer.cpp
         AutoRotate.cpp
 
         )
@@ -24,3 +25,10 @@ pico_add_extra_outputs(${NAME})
 # enable usb output, disable uart output
 pico_enable_stdio_usb(${NAME} 1)
 pico_enable_stdio_uart(${NAME} 0)
+
+# Streamed audio arrives at 48 KB/s; the default 64-byte USB receive buffer
+# can't keep up between polls
+target_compile_definitions(${NAME} PRIVATE
+    CFG_TUD_CDC_RX_BUFSIZE=4096
+    CFG_TUD_CDC_TX_BUFSIZE=1024
+    )

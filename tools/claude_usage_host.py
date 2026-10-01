@@ -30,6 +30,12 @@ Two data sources, both on your Mac:
    local logs (shown as "5-HOUR est.").
    Pass --no-limits to skip this entirely.
 
+It can also play music from a folder on the Mac through the board's speaker
+(--music). The audio is decoded on the Mac to 24 kHz 16-bit mono and streamed
+over the same USB serial link. Decoding uses ffmpeg if it is installed,
+otherwise macOS's built-in afconvert (MP3, AAC/M4A, WAV, AIFF, FLAC, ...).
+Tap the now-playing row on the screen to skip to the next track.
+
 Only the Python 3 standard library is needed.
 
     python3 tools/claude_usage_host.py             # auto-detect the board
@@ -37,6 +43,7 @@ Only the Python 3 standard library is needed.
     python3 tools/claude_usage_host.py --demo      # fake data, to test the screen
     python3 tools/claude_usage_host.py --check     # show what it finds, then exit
     python3 tools/claude_usage_host.py --imu       # live accelerometer readings
+    python3 tools/claude_usage_host.py --music ~/Music/Desk --shuffle --volume 60
 """
 
 import argparse
@@ -53,10 +60,12 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 import tty
 import urllib.error
 import urllib.request
+import wave
 from datetime import datetime, timedelta, timezone
 
 BLOCK = timedelta(hours=5)
@@ -467,7 +476,7 @@ class Board:
             pass
 
     def send(self, line):
-        data = (line + "\n").encode()
+        data = line if isinstance(line, bytes) else (line + "\n").encode()
         while data:
             _, w, _ = select.select([], [self.fd], [], 2)
             if not w:
@@ -513,6 +522,205 @@ def find_board(port=None):
 
 
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Music
+# --------------------------------------------------------------------------
+
+AUDIO_RATE = 24000          # what the board's ES8311 codec is clocked for
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".alac", ".wav", ".aif", ".aiff", ".aifc",
+              ".caf", ".flac", ".ogg", ".opus"}
+CHUNK = 4096                # bytes of PCM per "@A" message
+
+
+class Decoder:
+    """Turns an audio file into 24 kHz, 16-bit little-endian mono PCM."""
+
+    def __init__(self, path):
+        self.path = path
+        self.proc = None
+        self.wav = None
+        self.tmp = None
+        self.duration = 0
+        if shutil.which("ffmpeg"):
+            self._open_ffmpeg()
+        elif shutil.which("afconvert"):
+            self._open_afconvert()
+        else:
+            self._open_wav(path)
+
+    def _open_ffmpeg(self):
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-v", "error", "-nostdin", "-i", self.path,
+             "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(AUDIO_RATE), "-"],
+            stdout=subprocess.PIPE)
+        if shutil.which("ffprobe"):
+            try:
+                out = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", self.path],
+                    capture_output=True, text=True, timeout=10).stdout
+                self.duration = int(float(out.strip() or 0))
+            except (ValueError, OSError, subprocess.SubprocessError):
+                pass
+
+    def _open_afconvert(self):
+        # afconvert can't write to a pipe, so decode into a temporary WAV first
+        fd, self.tmp = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        subprocess.run(["afconvert", "-f", "WAVE", "-d", f"LEI16@{AUDIO_RATE}", "-c", "1",
+                        self.path, self.tmp], check=True, capture_output=True)
+        self._open_wav(self.tmp)
+
+    def _open_wav(self, path):
+        w = wave.open(path, "rb")
+        if (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (AUDIO_RATE, 1, 2):
+            w.close()
+            raise RuntimeError("needs ffmpeg or afconvert to convert it "
+                               f"(only {AUDIO_RATE} Hz 16-bit mono WAV plays as is)")
+        self.wav = w
+        self.duration = w.getnframes() // AUDIO_RATE
+
+    def read(self, n):
+        if self.proc:
+            return self.proc.stdout.read(n)
+        return self.wav.readframes(n // 2)
+
+    def close(self):
+        if self.proc:
+            self.proc.kill()
+            self.proc.wait()
+        if self.wav:
+            self.wav.close()
+        if self.tmp:
+            try:
+                os.unlink(self.tmp)
+            except OSError:
+                pass
+
+
+def collect_tracks(paths):
+    out = []
+    for p in paths:
+        p = os.path.expanduser(p)
+        if os.path.isdir(p):
+            for root, _, files in os.walk(p):
+                out += [os.path.join(root, f) for f in files
+                        if os.path.splitext(f)[1].lower() in AUDIO_EXTS and not f.startswith(".")]
+        elif os.path.isfile(p):
+            out.append(p)
+    return sorted(out)
+
+
+class Player:
+    """Streams a playlist to the board, sending only as much as it has room for."""
+
+    def __init__(self, paths, shuffle=False, loop=False, volume=None):
+        self.paths = paths
+        self.shuffle = shuffle
+        self.loop = loop
+        self.volume = volume
+        self.queue = []
+        self.dec = None
+        self.state = "idle"         # idle, starting, streaming, ended, finished
+        self.credit = 0
+        self.waiting = False        # sent something, waiting for the board's @AF
+        self.waiting_since = 0.0
+        self._refill()
+        if not self.queue:
+            log(f"no audio files found in {', '.join(paths)}")
+            self.state = "finished"
+
+    def _refill(self):
+        tracks = collect_tracks(self.paths)
+        if self.shuffle:
+            random.shuffle(tracks)
+        self.queue = tracks
+
+    def _close(self):
+        if self.dec:
+            self.dec.close()
+            self.dec = None
+
+    def _expect(self, board, line):
+        board.send(line)
+        self.waiting = True
+        self.waiting_since = time.time()
+
+    def connected(self, board):
+        """(Re)start the current playlist position on a fresh connection."""
+        if self.state == "finished":
+            return
+        if self.volume is not None:
+            board.send(f"@VOL {self.volume}")
+        self.next(board)
+
+    def next(self, board):
+        self._close()
+        while True:
+            if not self.queue:
+                if not self.loop:
+                    log("playlist finished")
+                    self.state = "finished"
+                    return
+                self._refill()
+            path = self.queue.pop(0)
+            try:
+                self.dec = Decoder(path)
+                break
+            except (OSError, RuntimeError, wave.Error, subprocess.SubprocessError) as e:
+                log(f"skipping {os.path.basename(path)}: {e}")
+        title = os.path.splitext(os.path.basename(path))[0]
+        clean = title.replace(";", ",").replace("\n", " ")[:46]
+        dur = self.dec.duration
+        log(f"playing {title}" + (f" ({dur // 60}:{dur % 60:02d})" if dur else ""))
+        self.state = "starting"
+        self.credit = 0
+        self._expect(board, f"@PLAY dur={dur};title={clean}")
+
+    def handle(self, board, line):
+        if line.startswith(("@AOK ", "@AF ")):
+            try:
+                self.credit = int(line.split()[1])
+            except (IndexError, ValueError):
+                return
+            self.waiting = False
+            if self.state == "starting":
+                self.state = "streaming"
+        elif line == "@ADONE" and self.state == "ended":
+            self.next(board)
+        elif line == "@ANEXT" and self.state in ("starting", "streaming", "ended"):
+            board.send("@STOP")
+            self.next(board)
+
+    def pump(self, board):
+        """Send the next chunk if the board has room. True while there is more to send."""
+        if self.state not in ("starting", "streaming"):
+            return False
+        if self.waiting:
+            if time.time() - self.waiting_since > 3:
+                if self.state == "starting":
+                    log("the board didn't answer @PLAY; is its firmware up to date?")
+                    self.state = "finished"
+                    return False
+                self._expect(board, "@AQ")     # a reply got lost, ask again
+            return True
+        if self.credit >= 1024:
+            n = min(CHUNK, self.credit) & ~1
+            data = self.dec.read(n)
+            if data:
+                self.credit -= len(data)
+                self._expect(board, f"@A {len(data)}\n".encode() + data)
+            else:
+                board.send("@AEND")
+                self.state = "ended"
+                self._close()
+        else:
+            # Buffer full: ask again in a moment
+            if time.time() - self.waiting_since > 0.05:
+                self._expect(board, "@AQ")
+        return True
+
 
 def encode(fields):
     def clean(v):
@@ -605,6 +813,51 @@ def check(args, reader):
         b.close()
 
 
+def _fetch_limits_into(args, lim):
+    try:
+        data = fetch_limits(args.token_file, renew=not args.no_renew)
+        if lim["err"] is not None:
+            log("plan limits OK")
+        lim["data"], lim["err"] = data, None
+    except (LimitsError, ValueError) as e:
+        if lim["err"] is None or str(e) != str(lim["err"]):
+            log(f"plan limits unavailable, using the local estimate: {e}")
+        lim["err"], lim["data"] = e, None
+    finally:
+        lim["thread"] = None
+
+
+def usage_fields(args, reader, lim):
+    """One usage snapshot. lim holds the plan-limit cache between calls.
+
+    The plan limits are fetched on a background thread: the request, and
+    especially renewing the login with `claude -p`, can take many seconds, and
+    the main loop must keep feeding audio to the board meanwhile. Only the first
+    fetch is waited for, so the first update already has the limits."""
+    if args.demo:
+        return demo_fields()
+    reader.scan()
+    fields = local_stats(reader.entries, args.block_limit)
+    fields["src"] = "l"
+    if args.no_limits:
+        lim["err"] = LimitsError("disabled", "")
+    elif lim["thread"] is None and time.time() - lim["at"] >= args.limits_interval:
+        first = lim["at"] == 0.0
+        lim["at"] = time.time()
+        t = threading.Thread(target=_fetch_limits_into, args=(args, lim), daemon=True)
+        lim["thread"] = t
+        t.start()
+        if first:
+            t.join(20)
+    if lim["data"]:
+        fields.update(lim["data"])
+    st = status_text(reader.entries, lim["err"])
+    if st:
+        fields["st"] = st
+    fields["t"] = datetime.now().strftime("%H:%M")
+    return fields
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", help="serial port (default: auto-detect /dev/cu.usbmodem*)")
@@ -625,7 +878,14 @@ def main():
     ap.add_argument("--check", action="store_true", help="report the logs, token and board it finds, then exit")
     ap.add_argument("--imu", action="store_true",
                     help="print the board's accelerometer readings, to set IMU_SHORT_AXIS / IMU_FLIP")
+    ap.add_argument("--music", nargs="+", metavar="PATH",
+                    help="audio files or folders to play through the board's speaker")
+    ap.add_argument("--shuffle", action="store_true", help="shuffle the --music playlist")
+    ap.add_argument("--loop", action="store_true", help="start the playlist again when it ends")
+    ap.add_argument("--volume", type=int, metavar="0-100", help="speaker volume")
     args = ap.parse_args()
+    if args.print and args.music:
+        ap.error("--music needs the board, it can't be combined with --print")
 
     if args.imu:
         board = find_board(args.port)
@@ -652,71 +912,68 @@ def main():
             log("note: only Claude Code running on this Mac writes these logs. Usage in the Claude app, "
                 "on claude.ai or in Claude Code on the web shows up only through the plan limits.")
 
-    limits, limits_at, limits_err = None, 0.0, None
+    lim = {"data": None, "at": 0.0, "err": None, "thread": None}
+
+    if args.print:
+        while True:
+            print(encode(usage_fields(args, reader, lim)), flush=True)
+            if args.once:
+                return
+            time.sleep(args.interval)
+
+    player = Player(args.music, args.shuffle, args.loop, args.volume) if args.music else None
     board = None
+    next_usage = 0.0
     last_summary = None
+    ok_due = None           # when an @OK for the last update should have arrived
+    start_player = False
     warned_ack = False
 
     while True:
-        if args.demo:
-            fields = demo_fields()
-        else:
-            reader.scan()
-            fields = local_stats(reader.entries, args.block_limit)
-            fields["src"] = "l"
-            if args.no_limits:
-                limits_err = LimitsError("disabled", "")
-            elif time.time() - limits_at >= args.limits_interval:
-                limits_at = time.time()
-                try:
-                    limits = fetch_limits(args.token_file, renew=not args.no_renew)
-                    if limits_err is not None:
-                        log("plan limits OK")
-                    limits_err = None
-                except (LimitsError, ValueError) as e:
-                    if limits_err is None or str(e) != str(limits_err):
-                        log(f"plan limits unavailable, using the local estimate: {e}")
-                    limits_err, limits = e, None
-            if limits:
-                fields.update(limits)
-            st = status_text(reader.entries, limits_err)
-            if st:
-                fields["st"] = st
-            fields["t"] = datetime.now().strftime("%H:%M")
-
-        line = encode(fields)
-
-        if args.print:
-            print(line, flush=True)
-        else:
-            if board is None:
-                board = find_board(args.port)
-                if board:
-                    log(f"connected to {board.port}")
-                    last_summary = None
-                else:
-                    log("board not found, retrying in 5s (is it plugged in and running the firmware?)")
-                    time.sleep(5)
-                    continue
-            try:
-                board.send(line)
-                replies = board.read_lines(0.5)
-            except OSError as e:
-                log(f"lost the board: {e}")
-                board.close()
-                board = None
+        if board is None:
+            board = find_board(args.port)
+            if not board:
+                log("board not found, retrying in 5s (is it plugged in and running the firmware?)")
+                time.sleep(5)
                 continue
-            if "@OK" not in replies and not warned_ack:
-                log("warning: the board didn't acknowledge the update (@OK). Is its firmware up to date?")
-                warned_ack = True
-            s = summary(fields)
-            if s != last_summary:
-                log("sending " + s)
-                last_summary = s
-
-        if args.once:
-            break
-        time.sleep(args.interval)
+            log(f"connected to {board.port}")
+            next_usage = 0.0
+            last_summary = None
+            start_player = player is not None
+        try:
+            if time.time() >= next_usage:
+                fields = usage_fields(args, reader, lim)
+                board.send(encode(fields))
+                next_usage = time.time() + args.interval
+                ok_due = time.time() + 2
+                s = summary(fields)
+                if s != last_summary:
+                    log("sending " + s)
+                    last_summary = s
+                if args.once:
+                    board.read_lines(0.5)
+                    return
+            if start_player:
+                # After the first update, which may wait for the plan limits
+                player.connected(board)
+                start_player = False
+            streaming = player.pump(board) if player else False
+            # Wait for the board's replies; briefly while audio is flowing
+            wait = 0.005 if streaming else min(1.0, max(0.0, next_usage - time.time()))
+            for line in board.read_lines(wait):
+                if line == "@OK":
+                    ok_due = None
+                elif player:
+                    player.handle(board, line)
+            if ok_due and time.time() > ok_due:
+                ok_due = None
+                if not warned_ack:
+                    log("warning: the board didn't acknowledge the update (@OK). Is its firmware up to date?")
+                    warned_ack = True
+        except OSError as e:
+            log(f"lost the board: {e}")
+            board.close()
+            board = None
 
 
 if __name__ == "__main__":

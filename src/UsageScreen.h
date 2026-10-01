@@ -16,9 +16,12 @@
 #include "lvgl.h"
 #include "UsageData.h"
 #include "SerialLink.h"
+#include "AudioPlayer.h"
 
 class UsageScreen {
 public:
+    explicit UsageScreen(AudioPlayer *audio = nullptr) : xLink(audio), pAudio(audio) {}
+
     void init();
 
 private:
@@ -26,6 +29,7 @@ private:
     static void tickCB(lv_timer_t *timer);
     static void clickCB(lv_event_t *e);
     static void arcAnimCB(void *arc, int32_t v);
+    static void musicClickCB(lv_event_t *e);
 
     lv_obj_t *makeCard(lv_coord_t x, lv_coord_t w);
     lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, lv_color_t color, const char *text);
@@ -38,6 +42,7 @@ private:
     void apply();          // redraw everything from xData
     void refreshTimers();  // countdowns and the link indicator
     void setBar(lv_obj_t *bar, lv_obj_t *label, int pct);
+    void refreshMusic();   // now-playing row, in place of model / burn rate
 
     UsageData xData;
     SerialLink xLink;
@@ -69,6 +74,14 @@ private:
     lv_obj_t *pPeak;
     lv_obj_t *pModel;
     lv_obj_t *pBurn;
+
+    // Now playing
+    AudioPlayer *pAudio;
+    bool xShowingMusic = false;
+    lv_obj_t *pMusicRow;
+    lv_obj_t *pMusicBar;
+    lv_obj_t *pMusicTitle;
+    lv_obj_t *pMusicTime;
 };
 
 #endif /* SRC_USAGESCREEN_H_ */
