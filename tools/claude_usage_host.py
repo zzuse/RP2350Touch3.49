@@ -52,6 +52,7 @@ Only the Python 3 standard library is needed.
 """
 
 import argparse
+import atexit
 import glob
 import json
 import fcntl
@@ -60,6 +61,7 @@ import platform
 import random
 import select
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -834,6 +836,7 @@ class Player:
         self.credit = 0
         self.waiting = False        # sent something, waiting for the board's @AF
         self.waiting_since = 0.0
+        self.pass_played = False    # some track in this pass over the playlist made sound
         self._refill()
         if not self.queue:
             log(f"no audio files found in {', '.join(paths)}")
@@ -844,6 +847,7 @@ class Player:
         if self.shuffle:
             random.shuffle(tracks)
         self.queue = tracks
+        self.pass_played = False
 
     def _close(self):
         if self.dec:
@@ -865,21 +869,20 @@ class Player:
 
     def next(self, board):
         self._close()
-        refilled = False
         while True:
             if not self.queue:
                 if not self.loop:
                     log("playlist finished")
                     self.state = "finished"
                     return
-                if refilled:
-                    # A whole pass over the playlist found nothing playable;
-                    # going round again would spin and starve the usage updates
-                    log("no playable tracks left in the playlist, stopping the music")
+                if not self.pass_played:
+                    # A whole pass over the playlist produced no audio: every
+                    # file failed to open, or (with ffmpeg) decoded to nothing.
+                    # Going round again would never end.
+                    log("no playable tracks in the playlist, stopping the music")
                     self.state = "finished"
                     return
                 self._refill()
-                refilled = True
                 continue
             path = self.queue.pop(0)
             try:
@@ -919,6 +922,7 @@ class Player:
             if time.time() - self.waiting_since > 3:
                 if self.state == "starting":
                     log("the board didn't answer @PLAY; is its firmware up to date?")
+                    self._close()
                     self.state = "finished"
                     return False
                 self._expect(board, "@AQ")     # a reply got lost, ask again
@@ -927,6 +931,7 @@ class Player:
             n = min(CHUNK, self.credit) & ~1
             data = self.dec.read(n)
             if data:
+                self.pass_played = True
                 self.credit -= len(data)
                 self._expect(board, f"@A {len(data)}\n".encode() + data)
             else:
@@ -1175,6 +1180,11 @@ def main():
             time.sleep(args.interval)
 
     player = Player(args.music, args.shuffle, args.loop, args.volume) if args.music else None
+    if player:
+        # Don't leave the current track's decoded temp WAV (or ffmpeg) behind
+        # on Ctrl-C, or when launchd or logging out stops the script
+        atexit.register(player._close)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     board = None
     next_usage = 0.0
     next_stats = 0.0

@@ -170,6 +170,62 @@ class PlayerTest(unittest.TestCase):
             player.next(FakeBoard())
         self.assertEqual(player.state, "finished")
 
+    def silent_wav(self, name, frames=0):
+        import wave
+        with wave.open(os.path.join(self.dir.name, name), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(host.AUDIO_RATE)
+            w.writeframes(b"\0\0" * frames)
+
+    def run_board(self, player, board, steps=200):
+        """Answer like the firmware until the player stops or steps run out."""
+        for _ in range(steps):
+            if player.state == "finished":
+                return
+            last = board.sent[-1] if board.sent else ""
+            if isinstance(last, str) and last.startswith("@PLAY"):
+                player.handle(board, "@AOK 60000")
+            elif last == "@AEND":
+                player.handle(board, "@ADONE")
+            elif isinstance(last, bytes) or last == "@AQ":
+                player.handle(board, "@AF 60000")
+            player.pump(board)
+
+    def test_looping_playlist_of_tracks_with_no_audio_stops(self):
+        # Opens fine (like a corrupt file under ffmpeg) but decodes to nothing
+        self.silent_wav("a.wav")
+        self.silent_wav("b.wav")
+        with mock.patch.object(host.shutil, "which", return_value=None):
+            player = host.Player([self.dir.name], loop=True)
+            board = FakeBoard()
+            player.connected(board)
+            self.run_board(player, board)
+        self.assertEqual(player.state, "finished")
+        self.assertEqual(sum(1 for l in board.sent if isinstance(l, str) and l.startswith("@PLAY")), 2)
+
+    def test_looping_playlist_with_audio_keeps_going(self):
+        self.silent_wav("a.wav", frames=100)
+        self.silent_wav("b.wav")
+        with mock.patch.object(host.shutil, "which", return_value=None):
+            player = host.Player([self.dir.name], loop=True)
+            board = FakeBoard()
+            player.connected(board)
+            self.run_board(player, board)
+            self.assertNotEqual(player.state, "finished")
+            player._close()
+
+    def test_unanswered_play_closes_the_decoder(self):
+        self.silent_wav("a.wav", frames=100)
+        with mock.patch.object(host.shutil, "which", return_value=None):
+            player = host.Player([self.dir.name])
+            player.connected(FakeBoard())
+            self.assertIsNotNone(player.dec)
+            player.waiting_since -= 10      # no @AOK for 10 s
+            player.pump(FakeBoard())
+        self.assertEqual(player.state, "finished")
+        self.assertIsNone(player.dec)
+
     def test_looping_playlist_skips_bad_tracks(self):
         import wave
         self.track("a.wav", b"not a wav file")
