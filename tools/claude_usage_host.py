@@ -30,6 +30,11 @@ Two data sources, both on your Mac:
    local logs (shown as "5-HOUR est.").
    Pass --no-limits to skip this entirely.
 
+All-time daily totals, the longest task and streaks for the board's stats
+page are worked out from the same logs. Claude Code deletes old logs (after 30
+days by default), so the daily totals are also kept in
+~/.config/claude-usage-display/history.json (--history-file).
+
 It can also play music from a folder on the Mac through the board's speaker
 (--music). The audio is decoded on the Mac to 24 kHz 16-bit mono and streamed
 over the same USB serial link. Decoding uses ffmpeg if it is installed,
@@ -71,6 +76,10 @@ from datetime import datetime, timedelta, timezone
 BLOCK = timedelta(hours=5)
 HOURS = 12
 KEEP = timedelta(days=8)
+STATS_INTERVAL = 300                # seconds between @CS (history stats) updates
+HEATMAP_WEEKS = 16
+TASK_GAP = timedelta(minutes=30)    # a pause this long ends a task
+HISTORY_FILE = "~/.config/claude-usage-display/history.json"
 
 # USD per million tokens: (input, output, cache read). Cache writes are
 # billed at 1.25x input. First match wins, so more specific names go first.
@@ -138,12 +147,16 @@ def parse_ts(s):
 
 
 class LogReader:
-    """Incrementally reads new lines from the JSONL logs."""
+    """Incrementally reads new lines from the JSONL logs.
 
-    def __init__(self):
+    Only the last 8 days are kept in entries; every record is also passed to
+    history (if given), which keeps the all-time stats."""
+
+    def __init__(self, history=None):
         self.offsets = {}   # path -> bytes already read
         self.seen = set()   # (message id, request id), streaming writes duplicates
         self.entries = []   # (time, model, tokens, cost), sorted by time
+        self.history = history
 
     def scan(self):
         new = []
@@ -170,7 +183,9 @@ class LogReader:
                 for raw in data[:end].splitlines():
                     e = self.parse_line(raw)
                     if e:
-                        new.append(e)
+                        new.append(e[:4])
+                        if self.history is not None:
+                            self.history.add(e[0], e[2], e[4] or path)
         if new:
             cutoff = datetime.now(timezone.utc) - KEEP
             self.entries = sorted(
@@ -208,7 +223,7 @@ class LogReader:
         if cost is None:
             pi, po, pr = price_for(model)
             cost = (inp * pi + out * po + cw * pi * 1.25 + cr * pr) / 1e6
-        return (ts, model, inp + out + cw + cr, float(cost))
+        return (ts, model, inp + out + cw + cr, float(cost), obj.get("sessionId"))
 
 
 def blocks(entries):
@@ -262,6 +277,162 @@ def local_stats(entries, block_limit_usd=None):
         s["bt"] = 0
         s["sr"] = -1
         s["sp"] = 0
+    return s
+
+
+# --------------------------------------------------------------------------
+# All-time history, for the stats page
+# --------------------------------------------------------------------------
+
+class History:
+    """Daily token totals and the longest task, kept beyond the logs' lifetime.
+
+    Claude Code deletes old logs (after 30 days by default), so the totals are
+    also saved to a small JSON file and merged back on start: per day, the
+    larger of the saved and freshly read totals wins. Logs only lose days, never
+    tokens within a day, so that never double counts.
+
+    A task is a stretch of one session's messages with no pause longer than
+    TASK_GAP, so a session left open overnight doesn't count as one long task."""
+
+    def __init__(self, path=HISTORY_FILE):
+        self.path = os.path.expanduser(path) if path else None
+        self.saved = {}         # "YYYY-MM-DD" -> tokens, from the file
+        self.days = {}          # "YYYY-MM-DD" -> tokens, read from the logs this run
+        self.sessions = {}      # session -> [task start, last message]
+        self.best_task = (0, "")    # (seconds, "YYYY-MM-DD") of finished tasks
+        self.load()
+
+    def load(self):
+        if not self.path:
+            return
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            self.saved = {d: int(t) for d, t in data.get("days", {}).items()}
+            lt = data.get("longest_task") or {}
+            self.best_task = (int(lt.get("seconds", 0)), str(lt.get("date", "")))
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+
+    def save(self):
+        """Writes the merged totals back. Returns True if the file changed."""
+        if not self.path:
+            return False
+        data = {"version": 1, "days": dict(sorted(self.daily().items())),
+                "longest_task": dict(zip(("seconds", "date"), self.longest_task()))}
+        try:
+            with open(self.path) as f:
+                if json.load(f) == data:
+                    return False
+        except (OSError, ValueError):
+            pass
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=1)
+            os.replace(tmp, self.path)
+            return True
+        except OSError as e:
+            log(f"can't save {self.path}: {e}")
+            return False
+
+    def add(self, ts, tokens, session):
+        local = ts.astimezone()
+        day = local.date().isoformat()
+        self.days[day] = self.days.get(day, 0) + tokens
+
+        s = self.sessions.get(session)
+        if s is None:
+            self.sessions[session] = [ts, ts]
+            return
+        start, last = s
+        if ts < last:           # out of order; keep the task going
+            return
+        if ts - last > TASK_GAP:
+            self._finish(start, last)
+            s[0] = ts
+        s[1] = ts
+
+    def _finish(self, start, last):
+        secs = int((last - start).total_seconds())
+        if secs > self.best_task[0]:
+            self.best_task = (secs, start.astimezone().date().isoformat())
+
+    def daily(self):
+        out = dict(self.saved)
+        for d, t in self.days.items():
+            out[d] = max(out.get(d, 0), t)
+        return out
+
+    def longest_task(self):
+        """(seconds, date), counting tasks still going on."""
+        best = self.best_task
+        for start, last in self.sessions.values():
+            secs = int((last - start).total_seconds())
+            if secs > best[0]:
+                best = (secs, start.astimezone().date().isoformat())
+        return best
+
+
+def streaks(active, today):
+    """(current, longest) runs of consecutive days in the set of dates active.
+
+    The current streak still counts if today has no usage yet but yesterday did."""
+    longest = run = 0
+    prev = None
+    for d in sorted(active):
+        run = run + 1 if prev is not None and d - prev == timedelta(days=1) else 1
+        longest = max(longest, run)
+        prev = d
+    current = 0
+    d = today if today in active else today - timedelta(days=1)
+    while d in active:
+        current += 1
+        d -= timedelta(days=1)
+    return current, longest
+
+
+def heatmap(daily, today, weeks=HEATMAP_WEEKS):
+    """Recent days as a string of levels 0-4, for a grid of weeks columns by
+    7 rows (Monday at the top). It starts on the Monday weeks-1 weeks before
+    this week's and ends today, so its length is 7*(weeks-1) + 1..7 and the
+    board fills it column by column. Returns (levels, tokens for level 4)."""
+    start = today - timedelta(days=today.weekday() + 7 * (weeks - 1))
+    vals = []
+    d = start
+    while d <= today:
+        vals.append(daily.get(d.isoformat(), 0))
+        d += timedelta(days=1)
+    top = max(vals, default=0)
+    if top <= 0:
+        return "0" * len(vals), 0
+    # 1-4 by quarters of the busiest day; any usage at all shows as at least 1
+    return "".join("0" if v <= 0 else str(min(4, 1 + 4 * v // (top + 1))) for v in vals), top
+
+
+def history_stats(history, today=None):
+    """The @CS fields for the stats page."""
+    today = today or datetime.now().date()
+    daily = {d: t for d, t in history.daily().items() if t > 0}
+    s = {"tot": sum(daily.values())}
+    if daily:
+        best = max(daily, key=lambda d: (daily[d], d))
+        s["hd"], s["hdt"] = best, daily[best]
+        s["fd"] = min(daily)
+    else:
+        s["hd"], s["hdt"], s["fd"] = "", 0, ""
+    active = set()
+    for d in daily:
+        try:
+            active.add(datetime.strptime(d, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    s["cs"], s["ls"] = streaks(active, today)
+    secs, day = history.longest_task()
+    s["lt"], s["ltd"] = secs // 60, day
+    s["hm"], s["hmax"] = heatmap(daily, today)
     return s
 
 
@@ -749,10 +920,34 @@ class Player:
         return True
 
 
-def encode(fields):
+def encode(fields, tag="@CU"):
     def clean(v):
         return str(v).replace(";", ",").replace("=", "-").replace("\n", " ")
-    return "@CU " + ";".join(f"{k}={clean(v)}" for k, v in fields.items())
+    return tag + " " + ";".join(f"{k}={clean(v)}" for k, v in fields.items())
+
+
+def demo_stats():
+    today = datetime.now().date()
+    daily = {(today - timedelta(days=i)).isoformat(): random.choice([0, 0, 1, 5, 20, 60]) * 1_000_000
+             for i in range(200)}
+    hm, top = heatmap(daily, today)
+    return {"tot": sum(daily.values()), "hd": max(daily, key=daily.get), "hdt": max(daily.values()),
+            "fd": min(daily), "cs": random.randint(0, 20), "ls": random.randint(20, 60),
+            "lt": random.randint(30, 400), "ltd": today.isoformat(), "hm": hm, "hmax": top}
+
+
+def stats_fields(args, history):
+    if args.demo:
+        return demo_stats()
+    s = history_stats(history)
+    if not args.print:
+        history.save()
+    return s
+
+
+def stats_summary(s):
+    return (f"stats: {s['tot']:,} tokens since {s['fd'] or '--'}, best day {s['hd'] or '--'} "
+            f"({s['hdt']:,}), streak {s['cs']} (longest {s['ls']}), longest task {s['lt']} min")
 
 
 def demo_fields():
@@ -807,6 +1002,11 @@ def check(args, reader):
     else:
         print("  Only Claude Code running on this Mac writes these; the Claude app, claude.ai")
         print("  and Claude Code on the web don't.")
+
+    print("History (stats page):")
+    st = history_stats(reader.history)
+    print(f"  {len(reader.history.daily())} days, {reader.history.path or 'not saved'}")
+    print("  " + stats_summary(st))
 
     print("Plan limits:")
     if args.no_limits:
@@ -910,6 +1110,8 @@ def main():
     ap.add_argument("--shuffle", action="store_true", help="shuffle the --music playlist")
     ap.add_argument("--loop", action="store_true", help="start the playlist again when it ends")
     ap.add_argument("--volume", type=int, metavar="0-100", help="speaker volume")
+    ap.add_argument("--history-file", default=HISTORY_FILE,
+                    help=f"where all-time daily totals are kept for the stats page (default {HISTORY_FILE})")
     args = ap.parse_args()
     if args.print and args.music:
         ap.error("--music needs the board, it can't be combined with --print")
@@ -925,7 +1127,7 @@ def main():
                 if l.startswith(("@IMU", "@ROT")):
                     print(l, flush=True)
 
-    reader = LogReader()
+    reader = LogReader(History(args.history_file))
     if not args.demo:
         dirs = claude_dirs()
         n = reader.scan()
@@ -942,8 +1144,12 @@ def main():
     lim = {"data": None, "at": 0.0, "err": None, "thread": None}
 
     if args.print:
+        next_stats = 0.0
         while True:
             print(encode(usage_fields(args, reader, lim)), flush=True)
+            if time.time() >= next_stats:
+                print(encode(stats_fields(args, reader.history), "@CS"), flush=True)
+                next_stats = time.time() + STATS_INTERVAL
             if args.once:
                 return
             time.sleep(args.interval)
@@ -951,7 +1157,9 @@ def main():
     player = Player(args.music, args.shuffle, args.loop, args.volume) if args.music else None
     board = None
     next_usage = 0.0
+    next_stats = 0.0
     last_summary = None
+    last_stats = None
     ok_due = None           # when an @OK for the last update should have arrived
     start_player = False
     warned_ack = False
@@ -965,7 +1173,9 @@ def main():
                 continue
             log(f"connected to {board.port}")
             next_usage = 0.0
+            next_stats = 0.0
             last_summary = None
+            last_stats = None
             start_player = player is not None
         try:
             if time.time() >= next_usage:
@@ -977,6 +1187,15 @@ def main():
                 if s != last_summary:
                     log("sending " + s)
                     last_summary = s
+                if time.time() >= next_stats:
+                    # Slow-moving, so much less often than the usage
+                    stats = stats_fields(args, reader.history)
+                    board.send(encode(stats, "@CS"))
+                    next_stats = time.time() + STATS_INTERVAL
+                    s = stats_summary(stats)
+                    if s != last_stats:
+                        log("sending " + s)
+                        last_stats = s
                 if args.once:
                     board.read_lines(0.5)
                     return

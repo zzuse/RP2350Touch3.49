@@ -35,8 +35,11 @@ title, elapsed and total time and a progress bar.
 **Auto-rotation.** Turn the board over and the picture flips 180° to stay
 upright.
 
-**Touch.** Tap the screen to cycle the backlight brightness. Tap the now-playing
-row to skip to the next track.
+**Touch.** Drag up or down along the left edge for backlight brightness, and
+along the right edge for speaker volume; a level meter shows on that edge while
+you drag. Swipe left or right in the middle to switch between the dashboard and
+the usage stats page (still a placeholder). Tap the now-playing row to skip to
+the next track.
 
 ## What you need
 

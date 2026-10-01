@@ -3,6 +3,7 @@
  */
 
 #include "UsageScreen.h"
+#include "Theme.h"
 
 #include <cstdio>
 #include <cstring>
@@ -11,20 +12,6 @@
 extern "C" {
 #include "DEV_Config.h"
 }
-
-// Palette: Anthropic's warm neutrals with the Claude orange as the accent
-#define COL_BG      lv_color_hex(0x0E0E0D)
-#define COL_CARD    lv_color_hex(0x1C1B19)
-#define COL_BORDER  lv_color_hex(0x2C2A27)
-#define COL_TRACK   lv_color_hex(0x34322E)
-#define COL_TEXT    lv_color_hex(0xF5F4EE)
-#define COL_MUTED   lv_color_hex(0x8E8B82)
-#define COL_ORANGE  lv_color_hex(0xD97757)
-#define COL_ODIM    lv_color_hex(0x6E3E2E)
-#define COL_GREEN   lv_color_hex(0x8FB573)
-#define COL_AMBER   lv_color_hex(0xE8A33D)
-#define COL_RED     lv_color_hex(0xE0564B)
-#define COL_BLUE    lv_color_hex(0x6A9BCC)
 
 #define SCREEN_H    172
 #define PAD         6
@@ -37,8 +24,6 @@ extern "C" {
 #define BAR_STEP    18
 
 #define STALE_MS    (120 * 1000)
-
-static const uint8_t kBrightness[] = {10, 30, 60, 100};
 
 static lv_color_t levelColor(int pct)
 {
@@ -72,23 +57,28 @@ void UsageScreen::init()
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(scr, clickCB, LV_EVENT_CLICKED, this);
 
+    xPager.init(2);
     buildSession();
     buildWeek();
     buildHistory();
+    buildStats();
 
     apply();
-    DEV_SET_PWM(kBrightness[xBrightIdx]);
+
+    // All touches go to the screen, which sorts them into gestures and taps
+    Gestures::passThrough(scr);
+    xGestures.init();
+    xLevels.init();
 
     // Frequent polling keeps up with streamed audio (48 KB/s)
     lv_timer_create(pollCB, 5, this);
     lv_timer_create(tickCB, 1000, this);
 }
 
-lv_obj_t *UsageScreen::makeCard(lv_coord_t x, lv_coord_t w)
+lv_obj_t *UsageScreen::makeCard(lv_obj_t *page, lv_coord_t x, lv_coord_t w)
 {
-    lv_obj_t *card = lv_obj_create(lv_scr_act());
+    lv_obj_t *card = lv_obj_create(page);
     lv_obj_remove_style_all(card);
     lv_obj_set_pos(card, x, PAD);
     lv_obj_set_size(card, w, CARD_H);
@@ -131,7 +121,7 @@ lv_obj_t *UsageScreen::makeBar(lv_obj_t *parent, lv_coord_t y)
 
 void UsageScreen::buildSession()
 {
-    lv_obj_t *card = makeCard(PAD, 172);
+    lv_obj_t *card = makeCard(xPager.page(0), PAD, 172);
 
     pArc = lv_arc_create(card);
     lv_obj_set_size(pArc, 128, 128);
@@ -162,7 +152,7 @@ void UsageScreen::buildSession()
 
 void UsageScreen::buildWeek()
 {
-    lv_obj_t *card = makeCard(PAD + 172 + PAD, 200);
+    lv_obj_t *card = makeCard(xPager.page(0), PAD + 172 + PAD, 200);
 
     lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "WEEKLY");
     lv_obj_set_pos(l, 12, 8);
@@ -193,7 +183,7 @@ void UsageScreen::buildWeek()
 void UsageScreen::buildHistory()
 {
     lv_coord_t x = PAD + 172 + PAD + 200 + PAD;
-    lv_obj_t *card = makeCard(x, 640 - x - PAD);
+    lv_obj_t *card = makeCard(xPager.page(0), x, 640 - x - PAD);
 
     lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "LAST 12 HOURS");
     lv_obj_set_pos(l, 12, 8);
@@ -242,14 +232,14 @@ void UsageScreen::buildHistory()
     pBurn = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
     lv_obj_align(pBurn, LV_ALIGN_TOP_RIGHT, -12, 136);
 
-    // Now-playing row: hidden until audio streams. Tap it for the next track.
+    // Now-playing row: hidden until audio streams. Tap it for the next track
+    // (see onTap).
     pMusicRow = lv_obj_create(card);
     lv_obj_remove_style_all(pMusicRow);
     lv_obj_set_pos(pMusicRow, 0, 131);
     lv_obj_set_size(pMusicRow, 640 - x - PAD - 2, CARD_H - 131 - 2);
     lv_obj_clear_flag(pMusicRow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pMusicRow, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(pMusicRow, musicClickCB, LV_EVENT_CLICKED, this);
 
     pMusicBar = lv_bar_create(pMusicRow);
     lv_obj_remove_style_all(pMusicBar);
@@ -269,6 +259,22 @@ void UsageScreen::buildHistory()
 
     pMusicTime = makeLabel(pMusicRow, &lv_font_montserrat_14, COL_MUTED, "");
     lv_obj_align(pMusicTime, LV_ALIGN_TOP_RIGHT, -12, 5);
+}
+
+void UsageScreen::buildStats()
+{
+    // Placeholder until the stats page is built out
+    lv_obj_t *card = makeCard(xPager.page(1), PAD, 640 - 2 * PAD);
+
+    lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "UNDERSTAND YOUR CLAUDE USAGE");
+    lv_obj_set_pos(l, 16, 12);
+
+    l = makeLabel(card, &lv_font_montserrat_16, COL_TEXT, "Usage stats are coming soon");
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, -8);
+    l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED,
+                  "total tokens  " LV_SYMBOL_BULLET "  best day  " LV_SYMBOL_BULLET "  streaks  "
+                  LV_SYMBOL_BULLET "  longest task  " LV_SYMBOL_BULLET "  daily heatmap");
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, 20);
 }
 
 void UsageScreen::refreshMusic()
@@ -311,11 +317,40 @@ void UsageScreen::refreshMusic()
         lv_bar_set_value(pMusicBar, prog, LV_ANIM_OFF);
 }
 
-void UsageScreen::musicClickCB(lv_event_t *e)
+/* ------------------------------------------------------------------------- */
+
+void UsageScreen::onEdgeBegin(Edge edge)
 {
-    // The Mac owns the playlist; ask it for the next track
-    (void)e;
-    printf("@ANEXT\n");
+    xLevels.begin(edge == LEFT ? LevelControls::BRIGHTNESS : LevelControls::VOLUME);
+}
+
+void UsageScreen::onEdgeDrag(Edge edge, lv_coord_t dy)
+{
+    (void)edge;
+    xLevels.drag(dy);
+}
+
+void UsageScreen::onEdgeEnd(Edge edge)
+{
+    (void)edge;
+    xLevels.end();
+}
+
+void UsageScreen::onSwipe(int dir)
+{
+    xPager.slide(dir);
+}
+
+void UsageScreen::onTap(const lv_point_t &p)
+{
+    if (xShowingMusic && xPager.current() == 0) {
+        lv_area_t a;
+        lv_obj_get_coords(pMusicRow, &a);
+        if (p.x >= a.x1 && p.x <= a.x2 && p.y >= a.y1 && p.y <= a.y2) {
+            // The Mac owns the playlist; ask it for the next track
+            printf("@ANEXT\n");
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -477,11 +512,4 @@ void UsageScreen::tickCB(lv_timer_t *timer)
     UsageScreen *self = (UsageScreen *)timer->user_data;
     self->refreshTimers();
     self->refreshMusic();
-}
-
-void UsageScreen::clickCB(lv_event_t *e)
-{
-    UsageScreen *self = (UsageScreen *)lv_event_get_user_data(e);
-    self->xBrightIdx = (self->xBrightIdx + 1) % (int)sizeof(kBrightness);
-    DEV_SET_PWM(kBrightness[self->xBrightIdx]);
 }

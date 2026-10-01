@@ -10,6 +10,9 @@
  * Keys: sp sr wp wr w2p w2l tt tc tm bt br h m t src st (see UsageData.h and
  * tools/claude_usage_host.py). Unknown keys are ignored.
  *
+ *   host -> board  "@CS key=value;..."        all-time stats, for the stats
+ *                                             page (not shown yet, ignored)
+ *
  * Audio (24 kHz, 16-bit little-endian mono PCM), credit based: the host only
  * sends as many bytes as the board last reported free.
  *   host -> board  "@PLAY dur=<s>;title=<text>"  board answers "@AOK <free bytes>"

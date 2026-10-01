@@ -73,7 +73,8 @@ static lv_obj_t *lable;
 static uint16_t ts_x;
 static uint16_t ts_y;
 static uint8_t gesture = 0;
-static lv_indev_state_t ts_act;
+static lv_indev_state_t ts_act = LV_INDEV_STATE_RELEASED;
+static volatile bool ts_irq = false;
 static lv_indev_drv_t indev_ts;
 
 // Timer
@@ -390,13 +391,10 @@ parameter:
 ********************************************************************************/
 static void touch_callback(uint gpio, uint32_t events)
 {
+    // Only note that the controller has news; the I2C read happens in
+    // ts_read_cb on the LVGL thread, not in interrupt context.
     if (gpio == TOUCH_INT_PIN)
-    {
-        Touch_Read_State();
-        ts_x = TOUCH.Point1_x;
-        ts_y = TOUCH.Point1_y;
-        ts_act = LV_INDEV_STATE_PRESSED;
-    }
+        ts_irq = true;
 }
 
 /********************************************************************************
@@ -405,6 +403,21 @@ parameter:
 ********************************************************************************/
 static void ts_read_cb(lv_indev_drv_t * drv, lv_indev_data_t*data)
 {
+    // Report a held finger as one continuous press, so LVGL can follow drags.
+    // While pressed, poll the controller every read: it may not raise INT for
+    // every move, and its lift-off report is what ends the press.
+    if (ts_irq || ts_act == LV_INDEV_STATE_PRESSED) {
+        ts_irq = false;
+        Touch_Read_State();
+        if (TOUCH.Finger_Num > 0 && TOUCH.Finger_Num <= 2) {
+            ts_x = TOUCH.Point1_x;
+            ts_y = TOUCH.Point1_y;
+            ts_act = LV_INDEV_STATE_PRESSED;
+        } else {
+            ts_act = LV_INDEV_STATE_RELEASED;
+        }
+    }
+
 #if DISP_LANDSCAPE
     // ts_x/ts_y are panel (portrait) coordinates
     lv_coord_t px = LV_MIN(ts_x, LCD_PHYS_W - 1);
@@ -421,7 +434,6 @@ static void ts_read_cb(lv_indev_drv_t * drv, lv_indev_data_t*data)
     data->point.y = ts_y;
 #endif
     data->state = ts_act;
-    ts_act = LV_INDEV_STATE_RELEASED;
 }
 
 /********************************************************************************
