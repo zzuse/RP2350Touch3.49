@@ -2,9 +2,23 @@
 
 ![Waveshare RP2350 Touch LCD 3.49](docs/images/waveshare-rp2350-touch-3.49.jpg)
 
-## Claude Usage Display
+A desk display for your Claude usage, built on the
+[Waveshare RP2350 Touch LCD 3.49](https://www.waveshare.com/wiki/RP2350-Touch-LCD-3.49).
+The repo holds two parts:
 
-The firmware shows your Claude usage on the 3.49" screen in landscape (640×172):
+- **Firmware** for the board, which draws the screen and plays audio.
+- **A host script** for the Mac, `tools/claude_usage_host.py`, which works out
+  the numbers and sends them over the USB cable.
+
+The board has no Wi-Fi or Bluetooth radio, so everything goes over the same USB
+cable that powers it. No drivers are needed.
+
+For how it works inside (serial protocol, LVGL port, drivers, pin map, the
+libraries it builds on), see the [developer guide](docs/README.md).
+
+## What it does
+
+**Claude usage display.** The 3.49" screen is used in landscape (640×172):
 
 - **Left:** the current 5-hour window as an arc (green < 60%, orange < 85%,
   red above), with the time until it resets.
@@ -14,200 +28,33 @@ The firmware shows your Claude usage on the 3.49" screen in landscape (640×172)
   the recent burn rate, and the Mac's clock. The dot beside the clock is green
   while updates are arriving, amber once they stop for 2 minutes.
 
-Tap the screen to cycle the backlight brightness.
+**Music from the Mac.** The host script can play a folder of music through the
+board's speaker. The files stay on the Mac. The right-hand card shows the track
+title, elapsed and total time and a progress bar.
 
-### How the data gets there
+**Auto-rotation.** Turn the board over and the picture flips 180° to stay
+upright.
 
-The board has no Wi-Fi or Bluetooth radio, so the Mac sends the numbers over the
-same USB cable that powers it (USB CDC serial, `/dev/cu.usbmodem*`). No drivers
-are needed.
+**Touch.** Tap the screen to cycle the backlight brightness. Tap the now-playing
+row to skip to the next track.
 
-`tools/claude_usage_host.py` runs on the Mac. It only needs the Python 3
-standard library:
+## What you need
 
-```sh
-python3 tools/claude_usage_host.py            # finds the board and updates it every 15 s
-python3 tools/claude_usage_host.py --print    # dry run: print what it would send
-python3 tools/claude_usage_host.py --demo     # random numbers, to test the screen
-```
-
-It reads two things:
-
-1. **Claude Code's local logs**, `~/.claude/projects/**/*.jsonl` (also
-   `~/.config/claude/projects` and `$CLAUDE_CONFIG_DIR`). Each assistant message
-   there records its token usage, which gives the totals, the hourly history and
-   the burn rate. Cost is estimated from list API prices. It isn't what a Pro or
-   Max subscription charges you.
-2. **Your plan limits**: the same 5-hour and weekly percentages that Claude
-   Code's `/usage` shows. These come from an unofficial endpoint
-   (`api.anthropic.com/api/oauth/usage`) and need an OAuth token. The script
-   looks for one in this order:
-   - `$CLAUDE_CODE_OAUTH_TOKEN`
-   - the file `~/.config/claude-usage-display/token` (or `--token-file`), for a
-     token you got some other way
-   - the token Claude Code keeps in the macOS keychain (`Claude Code-credentials`)
-     once you've logged in. The first time, macOS asks whether `security` may
-     read it.
-
-   The script only reads tokens and never refreshes them itself. Without a
-   working token, or with `--no-limits`, the arc shows an estimate instead,
-   labelled `5-HOUR est.`. The estimate compares the current window's cost with
-   your busiest earlier window, or with `--block-limit USD`.
-
-Only Claude Code **running on this Mac** writes the logs. Usage in the Claude
-app, on claude.ai or in Claude Code on the web leaves nothing in `~/.claude`, so
-if that's where you use Claude, every local number stays at 0. Those sessions
-do count towards the plan limits, so for them you need a working token.
-
-The token that can read usage is the one Claude Code keeps in the keychain after
-you log in on this Mac (`claude auth login`). Tokens from `claude setup-token`
-are refused (403, or 429 "rate limited"): they can run Claude but not read
-account usage. The script tries every token it finds, in the order above, and
-uses the first that works.
-
-The keychain token expires within hours, and only Claude Code can renew it. When
-the script finds it expired, it runs `claude -p` with a one-word prompt on Haiku
-so that Claude Code renews it, then reads the new token. That costs a few Haiku
-tokens of your plan a few times a day, and needs `claude` on your `PATH`. Pass
-`--no-renew` to turn it off; then, while the token is expired, the arc shows
-the local estimate and the screen says `limits: token expired` until you run
-`claude` yourself. If the login has lapsed completely, run `claude auth login`.
-
-When numbers are estimated or missing, the host sends a short reason, and the
-board shows it in amber under the arc: `no usage data on Mac`,
-`limits: no token`, `limits: token expired` or `limits: no access`.
-
-To see what the script finds without starting it, run:
-
-```sh
-python3 tools/claude_usage_host.py --check
-```
-
-It lists the log folders and how many records they hold, where the token came
-from and whether the limits request works, and whether the board answers and
-acknowledges a test update. While running, the script also logs a one-line
-summary whenever the values it sends change.
-
-To start it automatically at login, save this as
-`~/Library/LaunchAgents/com.claude-usage.display.plist` (fix the path), then
-run `launchctl load ~/Library/LaunchAgents/com.claude-usage.display.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.claude-usage.display</string>
-  <key>ProgramArguments</key><array>
-    <string>/usr/bin/python3</string>
-    <string>/path/to/RP2350Touch3.49/tools/claude_usage_host.py</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-</dict></plist>
-```
-
-### Serial protocol
-
-One line per message, newline terminated:
-
-| Direction | Line | Reply |
-|---|---|---|
-| Mac → board | `@PING` | `@PONG claude-usage 1` (used to find the port) |
-| Mac → board | `@CU key=value;key=value;...` | `@OK` |
-
-| Key | Meaning |
+| For | You need |
 |---|---|
-| `sp`, `sr` | 5-hour window: percent used, minutes until reset (`-1` = unknown) |
-| `wp`, `wr` | Weekly limit: percent used, minutes until reset |
-| `w2p`, `w2l` | Per-model weekly limit: percent, label (e.g. `SONNET`) |
-| `tt`, `tc`, `tm` | Today: tokens, cost in US cents, messages |
-| `bt`, `br` | Tokens in the current 5-hour window, tokens per minute recently |
-| `h` | 12 comma-separated hourly token counts, oldest first |
-| `m`, `t`, `src` | Model name, Mac clock `HH:MM`, `o` = limits from the API / `l` = local estimate |
-| `st` | Short note shown under the arc when numbers are estimated or zero (empty when all is well) |
+| The display | A Waveshare RP2350 Touch LCD 3.49 and a USB **data** cable |
+| Running the host script | macOS with Python 3. Only the standard library is used |
+| Usage numbers | [Claude Code](https://code.claude.com/docs/en/overview) installed and logged in on this Mac |
+| Music (optional) | `ffmpeg` for any format (`brew install ffmpeg`). Without it, macOS's built-in `afconvert` handles MP3, AAC/M4A, ALAC, WAV, AIFF, CAF and FLAC |
+| Building the firmware | [Pico SDK](https://github.com/raspberrypi/pico-sdk) 2.0.0 or newer, the ARM GNU Toolchain, CMake 3.13 or newer, Ninja and [`picotool`](https://github.com/raspberrypi/picotool) |
 
-Audio (see [Music from the Mac](#music-from-the-mac)) uses the same link. It is
-credit based: the Mac sends only as many bytes as the board last said it had
-free.
+The host script also runs on Linux. There it looks for the board at
+`/dev/ttyACM*` and for the Claude Code login in `~/.claude/.credentials.json`.
 
-| Direction | Line | Reply |
-|---|---|---|
-| Mac → board | `@PLAY dur=<seconds>;title=<text>` | `@AOK <free bytes>` |
-| Mac → board | `@A <n>`, then `n` bytes of raw PCM | `@AF <free bytes>` |
-| Mac → board | `@AQ` (ask for the free space again) | `@AF <free bytes>` |
-| Mac → board | `@AEND` (no more data for this track) | `@ADONE` once it has played out |
-| Mac → board | `@STOP`, `@VOL <0-100>` | none |
-| board → Mac | `@ANEXT` (the now-playing row was tapped) | |
+## Install
 
-The firmware side is `src/SerialLink.cpp` (parser), `src/UsageScreen.cpp` (UI) and
-`src/AudioPlayer.cpp` (playback).
-
-### Music from the Mac
-
-The host script can play a folder of music through the board's speaker. The
-files stay on the Mac. It decodes each one to 24 kHz, 16-bit mono (the rate the
-ES8311 codec is clocked for) and streams it over the USB serial link, at 48 KB/s.
-
-```sh
-python3 tools/claude_usage_host.py --music ~/Music/Desk
-python3 tools/claude_usage_host.py --music ~/Music/Desk --shuffle --loop --volume 60
-python3 tools/claude_usage_host.py --music song1.mp3 song2.m4a
-```
-
-Usage updates carry on as normal while music plays. The footer of the right-hand
-card shows the track title, elapsed and total time and a progress bar. Tap it to
-skip to the next track.
-
-For decoding, the script uses `ffmpeg` if it is installed (`brew install
-ffmpeg`, any format). Otherwise it uses macOS's built-in `afconvert`, which
-handles MP3, AAC/M4A, ALAC, WAV, AIFF, CAF and FLAC. It decodes the whole track
-to a temporary file first, which takes a second or two before playback starts.
-Without either, only WAV files already in 24 kHz 16-bit mono play.
-
-How it works on the board:
-
-- Core 0 reads USB in bulk into a 32768-sample (1.4 s) ring buffer. The USB
-  receive buffer is raised from 64 bytes to 4 KB (`src/CMakeLists.txt`) so it
-  keeps up while LVGL is busy redrawing.
-- Core 1 feeds the I2S PIO, and `pio_sm_put_blocking()` paces it at the codec's
-  sample rate. Between chunks of 5 ms it still does the power-button check it
-  did before.
-- Playback starts once 0.5 s is buffered. If the buffer runs dry, it plays
-  silence until data arrives. The speaker amplifier (`PA_CTRL`) is switched off
-  between tracks to avoid hiss.
-
-### Landscape mode
-
-LVGL renders a 640×172 frame, and the flush callback in `port/lvgl/lv_port.c`
-rotates it into the panel's native 172×640 scan order. It fills two small
-32-row buffers in turn, rotating into one while DMA sends the other, so it
-doesn't need a second 220 KB frame buffer. Touch coordinates are rotated to
-match. `DISP_ROTATION` in `port/lvgl/lv_port.h` sets the rotation at boot, 90°
-or 270°. `DISP_LANDSCAPE 0` restores the original portrait behaviour.
-
-### Auto-rotation
-
-`src/AutoRotate.cpp` reads the QMI8658 accelerometer every 100 ms. When you turn
-the board over, the picture flips 180° to stay upright. The new orientation has
-to hold for 0.6 s first, so knocking or carrying the board doesn't flip it. The
-layout is landscape only, so standing the board up in portrait, or laying it
-flat, keeps whatever orientation it had. At boot the board starts in whichever
-landscape orientation it is held in.
-
-Where the IMU chip's axes point relative to the panel depends on how it sits on
-the board, so two settings in `src/AutoRotate.h` may need changing:
-
-- `IMU_SHORT_AXIS`: the accelerometer axis along the panel's short side (0 = X,
-  1 = Y). If the screen never flips, or flips when you stand the board up in
-  portrait, change it.
-- `IMU_FLIP`: set to 1 if the picture is upside down in both orientations.
-
-`python3 tools/claude_usage_host.py --imu` prints the live readings. The axis
-that swings between about +g and −g as you turn the board over is the short
-axis. The board also prints `@ROT 90` or `@ROT 270` each time it flips.
-`AUTO_ROTATE 0` turns the feature off.
-
-## Building
+There is no prebuilt firmware, so you build it and flash it to the board once.
+The host script needs no installation.
 
 ### 1. Install the Pico SDK
 
@@ -255,201 +102,210 @@ The project includes its own copy of `pico_sdk_import.cmake`, so instead of the
 environment variable you can also pass `-DPICO_SDK_PATH=~/pico-sdk` to `cmake`, or set
 `PICO_SDK_FETCH_FROM_GIT=1` to have CMake download the SDK.
 
-> **Board header note:** Waveshare's own `waveshare_rp2350_touch_lcd_3.49.h` uses
-> `pico_board_cmake_set(PICO_PLATFORM, rp2350)`, a syntax added in Pico SDK 2.2.0.
-> SDK 2.1.x doesn't define that macro, so the header fails to compile there. The copy
-> in `boards/` uses the older comment form, `// pico_cmake_set PICO_PLATFORM=rp2350`,
-> which SDK 2.1.x and 2.2.0+ both understand.
-
 ### 4. Configure and build
 
 ```sh
 mkdir -p build && cd build
 cmake -G Ninja ..
 ninja
-# or
-cd build && cmake -G Ninja .. && ninja
 ```
 
+The resulting firmware is at `build/src/LVGL.uf2`.
+
 ### 5. Flash
-Put the board in BOOTSEL mode first, then:
+
+Put the board in BOOTSEL mode, then do one of these:
+
 ```sh
-ninja install
+ninja install                               # from build/, uses picotool
 # or
 picotool load build/src/LVGL.uf2 -v
 picotool reboot
-# or USB direct flash
+```
+
+You can also copy `build/src/LVGL.uf2` onto the drive the board shows up as in
+BOOTSEL mode. If the board is already running this firmware, `picotool` can
+reboot it into BOOTSEL and flash it in one go:
+
+```sh
 picotool load -f -x build/src/LVGL.uf2
 ```
 
-The resulting firmware is at `build/src/LVGL.uf2` — copy it to the board while
-it's in BOOTSEL mode to flash, or run `ninja install` to flash it via `picotool`
-directly (board must be in BOOTSEL mode and `picotool` on `PATH`).
+## Run
 
-## LVGL port
+Plug the board in and start the host script:
 
-LVGL v8.1.0 is vendored in `lib/lvgl` and is essentially upstream. The
-board-specific code lives outside it, in `port/lvgl/` and `lvgl.cmake`.
-
-### Changes to LVGL itself
-
-- `lib/lvgl/src/core/lv_refr.c` is the only source file that differs from upstream.
-  The perf/memory monitor overlays get zero padding, a fixed 120px width on the
-  perf label and a 1px offset on the memory label, to suit the narrow 172px
-  screen. Both monitors are disabled by default.
-- `lib/lvgl/CMakeLists.txt` is replaced with a minimal Pico-style file. It is not
-  used; the build goes through the top-level `lvgl.cmake`.
-
-### The port
-
-- **`lvgl.cmake`** builds LVGL as a static library from `lib/lvgl/src` plus
-  `port/lvgl`, and links it against `touch349` (the board drivers). `lv_conf.h`
-  lives in `port/lvgl`, outside the vendored library.
-- **`port/lvgl/lv_conf.h`** differs from LVGL's `lv_conf_template.h` as follows:
-  - `LV_COLOR_16_SWAP 1`, because the QSPI panel expects byte-swapped RGB565.
-  - `LV_DISP_DEF_REFR_PERIOD` 30 ms → 10 ms.
-  - Montserrat 16/24/26/28/30 enabled, and `LV_FONT_DEFAULT` 14 → 24.
-  - Monitor positions moved to `LV_ALIGN_LEFT_MID` / `LV_ALIGN_RIGHT_MID`.
-- **`port/lvgl/lv_port.c`** (`LVGL_Init()`) connects LVGL to the hardware. The
-  panel is 172×640 (portrait). LVGL sees it as 640×172 landscape by default
-  (see [Landscape mode](#landscape-mode)):
-  - **Display:** one full-screen draw buffer with `full_refresh`. In portrait
-    mode the flush callback sets the LCD window, sends `0x2C` (RAMWR) over QSPI
-    and starts a DMA transfer into the PIO TX FIFO. The DMA IRQ deselects the
-    chip and calls `lv_disp_flush_ready()`, so flushing is asynchronous. In
-    landscape mode the flush rotates and sends the frame in chunks and waits
-    for them to finish, so it is synchronous.
-  - **Touch:** a GPIO falling-edge IRQ reads the touch controller and latches
-    x/y. The LVGL pointer read callback reports one `PRESSED` and then `RELEASED`.
-  - **Tick:** a 5 ms repeating timer calls `lv_tick_inc(5)`. This is the only
-    tick source; don't add another.
-
-### Fixes to the Waveshare-derived code
-
-- The draw buffer is now allocated as `DISP_HOR_RES * DISP_VER_RES *
-  sizeof(lv_color_t)`. It was previously missing the `sizeof`, so at 16-bit color
-  it was half the size LVGL was told it had.
-- `LCD_3in49.c` included `"LCD_3IN49.h"`, which only works on a case-insensitive
-  file system such as macOS's default. It now matches the file name, so the
-  project also builds on Linux.
-- The duplicate `lv_tick_inc()` timer in `main.cpp` was removed. With both timers
-  running, LVGL's clock ran at about 2× real time.
-
-## Audio and SD card
-
-Drivers for the ES8311 audio codec and the micro SD card are taken from Waveshare's
-`02-ES8311` and `03-FatFs` demos for this board. Both are built and linked into the
-firmware. The audio is used for [music streamed from the Mac](#music-from-the-mac);
-the SD card isn't used yet.
-
-### Audio (ES8311)
-
-- `lib/touch349/ES8311`: codec driver over I2C (address `0x18`). It shares the I2C1
-  bus with the RTC and IMU.
-- `lib/touch349/Audio_PIO`: I2S via PIO. `pico_audio` holds the sample rate
-  (24 kHz), bit depth (16), volume and pins.
-- `lib/touch349/Audio_Data`: test tones (440 Hz sine, "Happy Birthday").
-- `tools/wav2data.py`: converts a 24 kHz, 16-bit mono WAV into a C array.
-
-Minimal playback:
-
-```c
-es8311_init(pico_audio);   // also switches on the speaker amplifier (PA_CTRL)
-es8311_sample_frequency_config(pico_audio.mclk_freq, pico_audio.sample_freq);
-es8311_voice_volume_set(pico_audio.volume);
-Sine_440hz_out();          // blocks forever
+```sh
+python3 tools/claude_usage_host.py            # finds the board and updates it every 15 s
+python3 tools/claude_usage_host.py --print    # dry run: print what it would send
+python3 tools/claude_usage_host.py --demo     # random numbers, to test the screen
+python3 tools/claude_usage_host.py --check    # show what it finds, then exit
 ```
 
-The Waveshare output functions (`Sine_440hz_out`, `Happy_birthday_out`,
-`Loopback_test`) loop forever using blocking PIO writes. Run them on a core that
-isn't driving LVGL, or feed samples with `pio_sm_put_blocking()` from your own loop.
+`--check` lists the log folders and how many records they hold, where the token
+came from and whether the limits request works, and whether the board answers
+and acknowledges a test update. While running, the script also logs a one-line
+summary whenever the values it sends change.
 
-Changes from Waveshare's code:
+### Options
 
-- Uses this project's `DEV_Config` (`DEV_I2C_Write_Byte` / `DEV_I2C_Read_Byte`)
-  instead of the demo's own copy.
-- `es8311_init()` now drives `PA_CTRL` (GPIO 0) high to enable the speaker
-  amplifier. The demo did this in its own `DEV_Module_Init()`.
-- `pico_audio` is defined once in `audio_pio.c`. It was previously a `static` in
-  the header, which gave every file its own copy.
-- `Music_out()` and its `music.h` song data (about 18 MB of source) were left out.
-  Use `tools/wav2data.py` to generate your own.
-- The `audio_pio.pio.h` header is generated at build time rather than checked in.
-- The I2S output program (`audio_pio` in `audio_pio.pio`) now lines up with
-  LRCLK's falling edge on every frame. Waveshare's did so once, at start-up, and
-  on about a third of boots came out a few bits off, which played as loud noise
-  instead of music until the next reboot. To make room for the wait, the right
-  channel's last bit is no longer sent; the codec is mono and plays the left.
-  The output FIFO is also 8 frames deep instead of 4.
-- `tools/wav2data.py`: fixed an unterminated string that stopped the script from
-  running.
+| Option | What it does |
+|---|---|
+| `--port PORT` | Serial port to use. Default: auto-detect `/dev/cu.usbmodem*` |
+| `--interval SECONDS` | Time between updates. Default 15 |
+| `--limits-interval SECONDS` | Time between plan-limit requests. Default 120 |
+| `--no-limits` | Don't ask for plan limits; use the local logs only |
+| `--no-renew` | Don't run `claude -p` to renew an expired Claude Code login |
+| `--token-file FILE` | File holding an OAuth token. Default `~/.config/claude-usage-display/token` |
+| `--block-limit USD` | For the local estimate: the API-equivalent cost that counts as 100% of a 5-hour window |
+| `--print` | Print the lines instead of sending them |
+| `--once` | Send one update and exit |
+| `--demo` | Send random data |
+| `--check` | Report the logs, token and board it finds, then exit |
+| `--music PATH ...` | Audio files or folders to play through the board's speaker |
+| `--shuffle`, `--loop` | Shuffle the playlist; start it again when it ends |
+| `--volume 0-100` | Speaker volume |
+| `--imu` | Print the board's accelerometer readings (see the [developer guide](docs/README.md#auto-rotation)) |
 
-### SD card (FatFs)
+### Start it at login
 
-- `lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico`: Carl Kugler's FatFs + SD driver library,
-  v3.3.1 (upstream commit `aca1922`), as shipped by Waveshare. Link the `sdcard`
-  target (defined in `fatfs.cmake`) to use it.
-- `port/fatfs/hw_config.c`: this board's card configuration. It is a single card in
-  SPI mode, mounted as `"0:"`.
+Save this as `~/Library/LaunchAgents/com.claude-usage.display.plist` (fix the
+path), then run
+`launchctl load ~/Library/LaunchAgents/com.claude-usage.display.plist`:
 
-```c
-FATFS fs;
-FIL fil;
-if (f_mount(&fs, "0:", 1) == FR_OK &&
-    f_open(&fil, "0:/test.txt", FA_READ) == FR_OK) {
-    /* f_read / f_gets ... */
-    f_close(&fil);
-}
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.claude-usage.display</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/python3</string>
+    <string>/path/to/RP2350Touch3.49/tools/claude_usage_host.py</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
 ```
 
-Waveshare's changes to the upstream library:
+### Music from the Mac
 
-- Their `hw_config.h` defines `SPI_SD0`, which selects SPI mode.
-- Their `rp2040_sdio.pio` uses `wait gpio` instead of `wait pin`.
-- They removed the upstream reference folders (`SdFat`, `ZuluSCSI-firmware`,
-  `mbed-os`).
-- They added an unused `rtc.c`/`rtc.h`.
+```sh
+python3 tools/claude_usage_host.py --music ~/Music/Desk
+python3 tools/claude_usage_host.py --music ~/Music/Desk --shuffle --loop --volume 60
+python3 tools/claude_usage_host.py --music song1.mp3 song2.m4a
+```
 
-Waveshare's `hw_config.c` declared four card slots on the same pins, one of them
-SDIO with no PIO assigned. The board copy in `port/fatfs` keeps only the real SPI
-slot. Waveshare's copy didn't include the library's Apache-2.0 `LICENSE`, so it was
-restored from upstream.
+Usage updates carry on as normal while music plays. Tap the now-playing row to
+skip to the next track.
 
-### Pin and resource map
+For decoding, the script uses `ffmpeg` if it is installed. Otherwise it uses
+`afconvert`, which decodes the whole track to a temporary file first; that takes
+a second or two before playback starts. Without either, only WAV files already
+in 24 kHz 16-bit mono play.
 
-| Function | Pins | Peripheral |
-|---|---|---|
-| LCD (QSPI) | CS 25, SCLK 20, D0–D3 21–24, RST 34, PWR 37 | `pio0`, 1 DMA channel + `DMA_IRQ_0` |
-| LCD backlight | 36 | PWM |
-| Touch | SDA 32, SCL 33, INT 11 | `i2c0` |
-| RTC, IMU, ES8311 | SDA 6, SCL 7 (IMU INT 8) | `i2c1` |
-| Audio I2S | DOUT 1, DIN 2, MCLK 3, BCLK 4, LRCLK 5 | `pio1` SM1–2, `pio2` SM0 |
-| Speaker amp enable | 0 (`PA_CTRL`) | GPIO |
-| SD card (SPI) | SCK 26, MOSI 27, MISO 28, CS 31 | `spi1`, 2 DMA channels (no IRQ) |
-| Power button / hold | 38 / 39 | GPIO |
-| Battery | 40 | ADC 0 |
+## Where the numbers come from
+
+The host script reads two things:
+
+1. **Claude Code's local logs**, `~/.claude/projects/**/*.jsonl` (also
+   `~/.config/claude/projects` and `$CLAUDE_CONFIG_DIR`). Each assistant message
+   there records its token usage, which gives the totals, the hourly history and
+   the burn rate. Cost is estimated from list API prices. It isn't what a Pro or
+   Max subscription charges you.
+2. **Your plan limits**: the same 5-hour and weekly percentages that Claude
+   Code's `/usage` shows. These come from an unofficial endpoint
+   (`api.anthropic.com/api/oauth/usage`) and need an OAuth token. The script
+   looks for one in this order:
+   - `$CLAUDE_CODE_OAUTH_TOKEN`
+   - the file `~/.config/claude-usage-display/token` (or `--token-file`), for a
+     token you got some other way
+   - the token Claude Code keeps in the macOS keychain (`Claude Code-credentials`)
+     once you've logged in. The first time, macOS asks whether `security` may
+     read it.
+
+   The script tries every token it finds, in that order, and uses the first
+   that works. Without a working token, or with `--no-limits`, the arc shows an
+   estimate instead, labelled `5-HOUR est.`. The estimate compares the current
+   window's cost with your busiest earlier window, or with `--block-limit USD`.
+
+Only Claude Code **running on this Mac** writes the logs. Usage in the Claude
+app, on claude.ai or in Claude Code on the web leaves nothing in `~/.claude`, so
+if that's where you use Claude, every local number stays at 0. Those sessions
+do count towards the plan limits, so for them you need a working token.
+
+### The token
+
+The token that can read usage is the one Claude Code keeps in the keychain after
+you log in on this Mac (`claude auth login`). Tokens from `claude setup-token`
+are refused (403, or 429 "rate limited"): they can run Claude but not read
+account usage.
+
+The keychain token expires within hours, and only Claude Code can renew it. When
+the script finds it expired, it runs `claude -p` with a one-word prompt on Haiku
+so that Claude Code renews it, then reads the new token. That costs a few Haiku
+tokens of your plan a few times a day. It looks for `claude` on your `PATH` and
+then in the usual install folders (`~/.local/bin`, Homebrew, nvm, ...), so it
+also works from launchd, which starts the script with a bare `PATH`. Pass
+`--no-renew` to turn it off; then, while the token is expired, the arc shows
+the local estimate until you run `claude` yourself. If the login has lapsed
+completely, run `claude auth login`.
+
+### Notes on the screen
+
+When numbers are estimated or missing, the board shows a short reason in amber
+under the arc:
+
+| Note | Meaning |
+|---|---|
+| `no usage data on Mac` | No Claude Code logs were found on this Mac |
+| `limits: no token` | No OAuth token was found. Log in with `claude auth login` |
+| `limits: token expired` | The token has expired and wasn't renewed. Run `claude` |
+| `limits: rate limited` | The usage endpoint answered 429. The script waits and asks again |
+| `limits: no access` | The token isn't allowed to read usage (a `claude setup-token` token) |
+| `limits: offline` | The request couldn't reach `api.anthropic.com` |
+| `limits: HTTP <code>` | The usage endpoint answered with another error |
+
+Run `python3 tools/claude_usage_host.py --check` for the full reason.
+
+## Privacy
+
+Everything runs on your Mac and the board. There is no server, account or
+telemetry of this project's own.
+
+- **What it reads.** From Claude Code's logs, the script takes each message's
+  timestamp, model name, token counts and cost. It doesn't use the text of your
+  prompts or Claude's replies, and it doesn't write to the logs.
+- **What goes over the network.** One kind of request: a `GET` to
+  `https://api.anthropic.com/api/oauth/usage`, every 2 minutes by default,
+  carrying your OAuth token. It goes to Anthropic and nowhere else.
+  `--no-limits` turns it off, and the script then makes no network requests.
+- **Your token.** The script reads the token and keeps it in memory. It doesn't
+  save, print or refresh it, and it never uses the refresh token, so it can't
+  log Claude Code out. The first time it reads the keychain, macOS asks for
+  your permission.
+- **Renewing the login.** When the keychain token has expired, the script runs
+  `claude -p "Reply with the single word: ok"` on Haiku, so Claude Code itself
+  sends that one request to Anthropic. The session isn't saved. `--no-renew`
+  turns it off.
+- **What the board gets.** Over USB only: the percentages, token counts, cost,
+  model name and clock listed in the
+  [serial protocol](docs/README.md#serial-protocol), and with `--music` the
+  audio and the track title. The board has no radio and the firmware stores
+  nothing; the numbers are gone when it loses power.
+- **Music.** Files are decoded on the Mac. With `afconvert`, the decoded copy is
+  a temporary file that is deleted when the track ends.
+
+The usage endpoint is unofficial and undocumented. It may change or stop working
+without notice; the display then falls back to the local estimate.
 
 ## Credits
 
 This project builds on the work of [Dr Jon Durrant](https://github.com/jondurrant),
-whose LVGL port and widget code for the Waveshare RP2350 Touch LCD 3.49 form the
-foundation of this project.
-
-His port is in turn adapted from the LVGL demo and hardware drivers supplied by
-[Waveshare](https://www.waveshare.com) for the board: the LCD, touch, QSPI PIO and
-device config code in `lib/touch349`, and the display/touch glue in
-`port/lvgl/lv_port.c`.
-
-The ES8311 audio code (`lib/touch349/ES8311`, `Audio_PIO`, `Audio_Data`,
-`tools/wav2data.py`) and the SD card setup also come from Waveshare's demos for this
-board.
-
-The UI is built with [LVGL](https://lvgl.io) v8.1.0, vendored in `lib/lvgl`.
-
-SD card support uses
-[no-OS-FatFS-SD-SDIO-SPI-RPi-Pico](https://github.com/carlk3/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico)
-by Carl John Kugler III (Apache-2.0, see its `LICENSE`), which is built on ChaN's
-[FatFs](http://elm-chan.org/fsw/ff/00index_e.html).
+whose LVGL port and widget code for this board form its foundation, and on the
+demos and hardware drivers supplied by [Waveshare](https://www.waveshare.com).
+The UI is built with [LVGL](https://lvgl.io). The full list of integrated
+libraries and sources is in the
+[developer guide](docs/README.md#integrated-libraries).
 
 ## License
 

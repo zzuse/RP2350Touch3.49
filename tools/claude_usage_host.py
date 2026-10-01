@@ -372,20 +372,47 @@ RENEW_EVERY = 600   # seconds between attempts, so a dead login doesn't cost a r
 _renewed_at = 0.0
 
 
+_claude_missing = False     # so the "can't find it" line is logged once, not every poll
+
+
+def find_claude():
+    """The `claude` executable: on PATH, or else where its installers put it.
+    launchd and GUI launchers start us with a bare PATH that has none of these."""
+    exe = shutil.which("claude")
+    if exe:
+        return exe
+    home = os.path.expanduser("~")
+    nvm = os.environ.get("NVM_DIR") or home + "/.nvm"
+    found = [p for pat in (home + "/.local/bin/claude", home + "/.claude/local/claude",
+                           "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
+                           nvm + "/versions/node/*/bin/claude", home + "/.volta/bin/claude",
+                           home + "/.bun/bin/claude", home + "/.npm-global/bin/claude")
+             for p in glob.glob(pat) if os.access(p, os.X_OK)]
+    return max(found, key=os.path.getmtime) if found else None
+
+
 def renew_login():
     """Get Claude Code to renew its expired login by running one tiny request
     through it. We never use the refresh token ourselves. True if it worked."""
-    global _renewed_at
+    global _renewed_at, _claude_missing
     if time.time() - _renewed_at < RENEW_EVERY:
         return False
-    _renewed_at = time.time()
-    exe = shutil.which("claude")
+    exe = find_claude()
     if not exe:
-        log("can't renew the Claude Code login: `claude` isn't on PATH")
+        # Not counted as an attempt: `claude` vanishes for a while each time it
+        # updates itself, so look again at the next poll.
+        if not _claude_missing:
+            log("can't renew the Claude Code login: can't find `claude` (not on PATH or in "
+                "the usual install folders); will keep looking")
+        _claude_missing = True
         return False
+    _claude_missing = False
+    _renewed_at = time.time()
     # With one of these set, Claude Code would use it and leave its login alone.
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    # An npm install of `claude` may be a node script: let it find the node beside it.
+    env["PATH"] = os.path.dirname(exe) + os.pathsep + env.get("PATH", os.defpath)
     try:
         r = subprocess.run(
             [exe, "-p", "Reply with the single word: ok", "--model", "haiku", "--no-session-persistence"],
