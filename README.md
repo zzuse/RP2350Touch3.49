@@ -49,10 +49,10 @@ It reads two things:
      once you've logged in. The first time, macOS asks whether `security` may
      read it.
 
-   The script only reads tokens and never refreshes them. Without a working
-   token, or with `--no-limits`, the arc shows an estimate instead, labelled
-   `5-HOUR est.`. The estimate compares the current window's cost with your
-   busiest earlier window, or with `--block-limit USD`.
+   The script only reads tokens and never refreshes them itself. Without a
+   working token, or with `--no-limits`, the arc shows an estimate instead,
+   labelled `5-HOUR est.`. The estimate compares the current window's cost with
+   your busiest earlier window, or with `--block-limit USD`.
 
 Only Claude Code **running on this Mac** writes the logs. Usage in the Claude
 app, on claude.ai or in Claude Code on the web leaves nothing in `~/.claude`, so
@@ -61,11 +61,17 @@ do count towards the plan limits, so for them you need a working token.
 
 The token that can read usage is the one Claude Code keeps in the keychain after
 you log in on this Mac (`claude auth login`). Tokens from `claude setup-token`
-are refused (403): they can run Claude but not read account usage. The keychain
-token expires within hours, and only Claude Code renews it, so run `claude` on
-the Mac now and then. While it's expired, the arc shows the local estimate and
-the screen says `limits: token expired`. The script tries every token it
-finds, in the order above, and uses the first that works.
+are refused (403, or 429 "rate limited"): they can run Claude but not read
+account usage. The script tries every token it finds, in the order above, and
+uses the first that works.
+
+The keychain token expires within hours, and only Claude Code can renew it. When
+the script finds it expired, it runs `claude -p` with a one-word prompt on Haiku
+so that Claude Code renews it, then reads the new token. That costs a few Haiku
+tokens of your plan a few times a day, and needs `claude` on your `PATH`. Pass
+`--no-renew` to turn it off; then, while the token is expired, the arc shows
+the local estimate and the screen says `limits: token expired` until you run
+`claude` yourself. If the login has lapsed completely, run `claude auth login`.
 
 When numbers are estimated or missing, the host sends a short reason, and the
 board shows it in amber under the arc: `no usage data on Mac`,
