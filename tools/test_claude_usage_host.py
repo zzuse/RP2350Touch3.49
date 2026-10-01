@@ -327,6 +327,29 @@ class LimitsTest(unittest.TestCase):
             f.write(b"\xff\xfe bad")
         self.assertEqual(host.oauth_tokens(self.token), [])
 
+    def test_token_with_bom_is_used(self):
+        with open(self.token, "w", encoding="utf-8") as f:
+            f.write("\ufeffsk-ant-oat01-abc\n")
+        self.assertEqual(host.oauth_tokens(self.token)[0][0], "sk-ant-oat01-abc")
+
+    def test_unusable_token_falls_through_without_logging_it(self):
+        with open(self.token, "w") as f:
+            f.write("sk-ant-oat01-SECRET\nsecond line")
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-good"}})
+        real_open = builtins.open
+
+        def fake_open(path, *a, **k):
+            if str(path).endswith(".credentials.json"):
+                return io.StringIO(creds)
+            return real_open(path, *a, **k)
+
+        err = io.StringIO()
+        with mock.patch.object(host.os.path, "exists", return_value=True), \
+                mock.patch("builtins.open", fake_open), mock.patch("sys.stderr", err):
+            tokens = host.oauth_tokens(self.token)
+        self.assertEqual([t for t, _, _ in tokens], ["sk-ant-oat01-good"])
+        self.assertNotIn("SECRET", err.getvalue())
+
     def test_malformed_replies(self):
         for body in (b"<html>proxy login</html>", b"[]", b'"text"', b"null"):
             with self.subTest(body=body), self.reply(body):

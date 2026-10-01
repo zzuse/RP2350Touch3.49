@@ -461,16 +461,28 @@ def _read_token_source(path):
         return None
 
 
+def _usable_token(tok, where):
+    """tok without a leading BOM, or None if it can't go in an HTTP header
+    (logged once, without the token itself)."""
+    tok = tok.lstrip("\ufeff").strip()
+    if tok and tok.isascii() and tok.isprintable():
+        return tok
+    if tok and (where, "unusable") not in _unreadable:
+        _unreadable.add((where, "unusable"))
+        log(f"the token in {where} has line breaks or characters that can't go in a request; skipping it")
+    return None
+
+
 def oauth_tokens(token_file=TOKEN_FILE):
     """Every token we can find, best first, as (token, where it came from,
     whether it is Claude Code's own login, which Claude Code can renew)."""
     out = []
-    tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    tok = _usable_token(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", ""), "$CLAUDE_CODE_OAUTH_TOKEN")
     if tok:
         out.append((tok, "$CLAUDE_CODE_OAUTH_TOKEN", False))
     path = os.path.expanduser(token_file)
     if os.path.isfile(path):
-        tok = (_read_token_source(path) or "").strip()
+        tok = _usable_token(_read_token_source(path) or "", path)
         if tok:
             out.append((tok, path, False))
     blobs = []
@@ -490,9 +502,11 @@ def oauth_tokens(token_file=TOKEN_FILE):
             blobs.append((blob, path))
     for blob, where in blobs:
         try:
-            out.append((json.loads(blob)["claudeAiOauth"]["accessToken"], where, True))
-        except (ValueError, KeyError, TypeError):
-            pass
+            tok = _usable_token(json.loads(blob)["claudeAiOauth"]["accessToken"], where)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if tok:
+            out.append((tok, where, True))
     return out
 
 
@@ -519,7 +533,12 @@ def _request_usage(tok):
         "User-Agent": "claude-usage-display/1",
     })
     with urllib.request.urlopen(req, timeout=15) as r:
-        return json.load(r)
+        try:
+            return json.load(r)
+        except ValueError as e:
+            # HTTP 200 but not JSON, e.g. a captive portal or proxy page
+            raise LimitsError(f"usage request returned something that isn't JSON: {e}",
+                              "limits: bad reply")
 
 
 _REJECTED = {401: "expired", 403: "not allowed to read usage", 429: "rate limited"}
@@ -554,10 +573,6 @@ def _first_working(tokens):
             raise LimitsError(f"usage request failed: HTTP {e.code}", f"limits: HTTP {e.code}")
         except (urllib.error.URLError, OSError) as e:
             raise LimitsError(f"usage request failed: {e}", "limits: offline")
-        except ValueError as e:
-            # HTTP 200 but not JSON, e.g. a captive portal or proxy page
-            raise LimitsError(f"usage request returned something that isn't JSON: {e}",
-                              "limits: bad reply")
         if not isinstance(data, dict):
             raise LimitsError(f"unexpected usage response: {str(data)[:80]}", "limits: bad reply")
         return data, rejected
