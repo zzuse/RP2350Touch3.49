@@ -102,6 +102,18 @@ class HistoryTest(unittest.TestCase):
         self.assertTrue(line.startswith("@CS tot=600;"))
         self.assertLess(len(line), 511)     # the board's line buffer
 
+    def test_bare_file_name(self):
+        # --history-file history.json: no directory part
+        cwd = os.getcwd()
+        os.chdir(self.dir.name)
+        try:
+            h = host.History("history.json")
+            h.add(at(1, 12), 5, "a")
+            self.assertTrue(h.save())
+        finally:
+            os.chdir(cwd)
+        self.assertTrue(os.path.exists(self.path))
+
     def test_corrupt_file_is_ignored(self):
         with open(self.path, "w") as f:
             f.write("{not json")

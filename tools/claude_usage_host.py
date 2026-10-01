@@ -296,7 +296,8 @@ class History:
     TASK_GAP, so a session left open overnight doesn't count as one long task."""
 
     def __init__(self, path=HISTORY_FILE):
-        self.path = os.path.expanduser(path) if path else None
+        # Absolute, so a bare file name has a directory to create and save into
+        self.path = os.path.abspath(os.path.expanduser(path)) if path else None
         self.saved = {}         # "YYYY-MM-DD" -> tokens, from the file
         self.days = {}          # "YYYY-MM-DD" -> tokens, read from the logs this run
         self.sessions = {}      # session -> [task start, last message]
