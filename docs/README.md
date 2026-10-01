@@ -263,8 +263,11 @@ board-specific code lives outside it, in `port/lvgl/` and `lvgl.cmake`.
     chip and calls `lv_disp_flush_ready()`, so flushing is asynchronous. In
     landscape mode the flush rotates and sends the frame in chunks and waits
     for them to finish, so it is synchronous.
-  - **Touch:** a GPIO falling-edge IRQ reads the touch controller and latches
-    x/y. The LVGL pointer read callback reports one `PRESSED` and then `RELEASED`.
+  - **Touch:** a GPIO falling-edge IRQ only flags that the touch controller has
+    news. The LVGL pointer read callback reads it over I2C, and keeps reading
+    every 15 ms while a finger is down, so a held finger is one continuous
+    `PRESSED` that LVGL can follow. `src/Gestures.cpp` turns that into edge
+    drags (brightness, volume), centre swipes (page change) and taps.
   - **Tick:** a 5 ms repeating timer calls `lv_tick_inc(5)`. This is the only
     tick source; don't add another.
 
