@@ -436,6 +436,7 @@ def history_stats(history, today=None):
     secs, day = history.longest_task()
     s["lt"], s["ltd"] = secs // 60, day
     s["hm"], s["hmax"] = heatmap(daily, today)
+    s["td"] = today.isoformat()
     return s
 
 
@@ -1000,7 +1001,8 @@ def demo_stats():
     hm, top = heatmap(daily, today)
     return {"tot": sum(daily.values()), "hd": max(daily, key=daily.get), "hdt": max(daily.values()),
             "fd": min(daily), "cs": random.randint(0, 20), "ls": random.randint(20, 60),
-            "lt": random.randint(30, 400), "ltd": today.isoformat(), "hm": hm, "hmax": top}
+            "lt": random.randint(30, 400), "ltd": today.isoformat(), "hm": hm, "hmax": top,
+            "td": today.isoformat()}
 
 
 def stats_fields(args, history):

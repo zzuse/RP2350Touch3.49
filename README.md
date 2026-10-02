@@ -28,6 +28,12 @@ libraries it builds on), see the [developer guide](docs/README.md).
   the recent burn rate, and the Mac's clock. The dot beside the clock is green
   while updates are arriving, amber once they stop for 2 minutes.
 
+**Usage stats.** Swipe to the second page for the long view: total tokens since
+the first day the Mac has logs for, your busiest day, the current and longest
+streak of days with usage, your longest task, and a heatmap of daily tokens over
+the last 16 weeks with today outlined. The Mac keeps the daily totals, so they
+survive Claude Code deleting old logs.
+
 **Music from the Mac.** The host script can play a folder of music through the
 board's speaker. The files stay on the Mac. The right-hand card shows the track
 title, elapsed and total time and a progress bar.
@@ -38,7 +44,7 @@ upright.
 **Touch.** Drag up or down along the left edge for backlight brightness, and
 along the right edge for speaker volume; a level meter shows on that edge while
 you drag. Swipe left or right in the middle to switch between the dashboard and
-the usage stats page (still a placeholder). Tap the now-playing row to skip to
+the usage stats page. Tap the now-playing row to skip to
 the next track.
 
 ## What you need

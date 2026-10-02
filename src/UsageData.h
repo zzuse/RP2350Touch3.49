@@ -34,4 +34,26 @@ struct UsageData {
     char status[24] = "";         // why the numbers are estimated or zero, e.g. "limits: token expired"
 };
 
+// All-time stats for the stats page, sent as "@CS key=value;..." every few
+// minutes (see history_stats() in tools/claude_usage_host.py)
+#define STATS_HEAT_WEEKS 16
+#define STATS_HEAT_DAYS  (STATS_HEAT_WEEKS * 7)
+
+struct StatsData {
+    uint64_t totalTokens = 0;     // tot
+    char firstDay[11] = "";       // fd, YYYY-MM-DD: the first day the total covers
+    char bestDay[11] = "";        // hd
+    uint64_t bestTokens = 0;      // hdt
+    uint32_t streak = 0;          // cs, days with usage up to today (or yesterday)
+    uint32_t longestStreak = 0;   // ls
+    int32_t longestTaskMin = -1;  // lt
+    char longestTaskDay[11] = "";
+    char today[11] = "";           // the Mac's date, to tell which dates are from an earlier year // ltd
+    // hm: one level 0-4 per day, oldest first, starting on a Monday and
+    // ending today, so day i is in week column i / 7, weekday row i % 7
+    uint8_t heat[STATS_HEAT_DAYS] = {0};
+    uint8_t heatDays = 0;
+    uint64_t heatMax = 0;         // hmax, tokens that make level 4
+};
+
 #endif /* SRC_USAGEDATA_H_ */

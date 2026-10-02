@@ -10,8 +10,9 @@
  * Keys: sp sr wp wr w2p w2l tt tc tm bt br h m t src st (see UsageData.h and
  * tools/claude_usage_host.py). Unknown keys are ignored.
  *
- *   host -> board  "@CS key=value;..."        all-time stats, for the stats
- *                                             page (not shown yet, ignored)
+ *   host -> board  "@CS key=value;..."        all-time stats for the stats
+ *                                             page, board answers "@OK"
+ *   Keys: tot fd hd hdt cs ls lt ltd hm hmax td (see StatsData in UsageData.h)
  *
  * Audio (24 kHz, 16-bit little-endian mono PCM), credit based: the host only
  * sends as many bytes as the board last reported free.
@@ -34,14 +35,17 @@ class SerialLink {
 public:
     explicit SerialLink(AudioPlayer *audio = nullptr) : xAudio(audio) {}
 
-    // Reads whatever is waiting on stdin without blocking.
-    // Returns true when a complete usage snapshot was received into out.
-    bool poll(UsageData &out);
+    enum { GOT_USAGE = 1, GOT_STATS = 2 };
+
+    // Reads whatever is waiting on stdin without blocking. Returns GOT_*
+    // bits for each complete message received into usage or stats.
+    int poll(UsageData &usage, StatsData &stats);
 
 private:
-    bool handleLine(char *line, UsageData &out);
+    int handleLine(char *line, UsageData &usage, StatsData &stats);
     void handleAudio(char *line);
     static void parseField(char *key, char *val, UsageData &out);
+    static void parseStat(char *key, char *val, StatsData &out);
 
     char xBuf[512];
     size_t xLen = 0;

@@ -104,6 +104,7 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual(s["tot"], 600)
         self.assertEqual(s["hdt"], 300)
         self.assertEqual(s["cs"], 3)
+        self.assertEqual(s["td"], "2026-09-30")
         line = host.encode(s, "@CS")
         self.assertTrue(line.startswith("@CS tot=600;"))
         self.assertLess(len(line), 511)     # the board's line buffer

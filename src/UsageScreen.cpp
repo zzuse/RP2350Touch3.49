@@ -4,6 +4,7 @@
 
 #include "UsageScreen.h"
 #include "Theme.h"
+#include "UiKit.h"
 
 #include <cstdio>
 #include <cstring>
@@ -25,28 +26,24 @@ extern "C" {
 
 #define STALE_MS    (120 * 1000)
 
+#define WEEK_W      200
+#define TODAY_W     (WEEK_W - 2 * 12)   // room for the cost and token labels
+#define TODAY_GAP   10                  // least space between them
+#define TODAY_Y     98                  // cost label top at full size
+
+static lv_coord_t textWidth(const lv_font_t *font, const char *text)
+{
+    lv_point_t size;
+    lv_txt_get_size(&size, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return size.x;
+}
+
 static lv_color_t levelColor(int pct)
 {
     if (pct < 0)  return COL_MUTED;
     if (pct < 60) return COL_GREEN;
     if (pct < 85) return COL_ORANGE;
     return COL_RED;
-}
-
-static void fmtTokens(char *buf, size_t n, uint64_t t)
-{
-    if (t < 1000ULL)                snprintf(buf, n, "%u", (unsigned)t);
-    else if (t < 1000000ULL)        snprintf(buf, n, "%.1fk", t / 1e3);
-    else if (t < 1000000000ULL)     snprintf(buf, n, "%.2fM", t / 1e6);
-    else                            snprintf(buf, n, "%.2fB", t / 1e9);
-}
-
-static void fmtDuration(char *buf, size_t n, int32_t min)
-{
-    if (min < 0)            snprintf(buf, n, "--");
-    else if (min >= 24 * 60) snprintf(buf, n, "%dd %dh", (int)(min / 1440), (int)((min % 1440) / 60));
-    else if (min >= 60)     snprintf(buf, n, "%dh %02dm", (int)(min / 60), (int)(min % 60));
-    else                    snprintf(buf, n, "%dm", (int)min);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -62,7 +59,7 @@ void UsageScreen::init()
     buildSession();
     buildWeek();
     buildHistory();
-    buildStats();
+    xStatsPage.build(xPager.page(1));
 
     apply();
 
@@ -74,31 +71,6 @@ void UsageScreen::init()
     // Frequent polling keeps up with streamed audio (48 KB/s)
     lv_timer_create(pollCB, 5, this);
     lv_timer_create(tickCB, 1000, this);
-}
-
-lv_obj_t *UsageScreen::makeCard(lv_obj_t *page, lv_coord_t x, lv_coord_t w)
-{
-    lv_obj_t *card = lv_obj_create(page);
-    lv_obj_remove_style_all(card);
-    lv_obj_set_pos(card, x, PAD);
-    lv_obj_set_size(card, w, CARD_H);
-    lv_obj_set_style_bg_color(card, COL_CARD, 0);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(card, 14, 0);
-    lv_obj_set_style_border_color(card, COL_BORDER, 0);
-    lv_obj_set_style_border_width(card, 1, 0);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_CLICKABLE);
-    return card;
-}
-
-lv_obj_t *UsageScreen::makeLabel(lv_obj_t *parent, const lv_font_t *font, lv_color_t color, const char *text)
-{
-    lv_obj_t *l = lv_label_create(parent);
-    lv_obj_set_style_text_font(l, font, 0);
-    lv_obj_set_style_text_color(l, color, 0);
-    lv_label_set_text(l, text);
-    return l;
 }
 
 lv_obj_t *UsageScreen::makeBar(lv_obj_t *parent, lv_coord_t y)
@@ -121,7 +93,7 @@ lv_obj_t *UsageScreen::makeBar(lv_obj_t *parent, lv_coord_t y)
 
 void UsageScreen::buildSession()
 {
-    lv_obj_t *card = makeCard(xPager.page(0), PAD, 172);
+    lv_obj_t *card = uiCard(xPager.page(0), PAD, 172);
 
     pArc = lv_arc_create(card);
     lv_obj_set_size(pArc, 128, 128);
@@ -140,55 +112,55 @@ void UsageScreen::buildSession()
 
     // Plain align (not align_to) so the labels stay centred when their text changes.
     // The arc's centre is at y = 6 + 64 = 70.
-    pSessPct = makeLabel(card, &lv_font_montserrat_30, COL_TEXT, "--");
+    pSessPct = uiLabel(card, &lv_font_montserrat_30, COL_TEXT, "--");
     lv_obj_align(pSessPct, LV_ALIGN_TOP_MID, 0, 48);
 
-    pSessSub = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "5-HOUR");
+    pSessSub = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "5-HOUR");
     lv_obj_align(pSessSub, LV_ALIGN_TOP_MID, 0, 82);
 
-    pSessReset = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "waiting for Mac");
+    pSessReset = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "waiting for Mac");
     lv_obj_align(pSessReset, LV_ALIGN_BOTTOM_MID, 0, -8);
 }
 
 void UsageScreen::buildWeek()
 {
-    lv_obj_t *card = makeCard(xPager.page(0), PAD + 172 + PAD, 200);
+    lv_obj_t *card = uiCard(xPager.page(0), PAD + 172 + PAD, WEEK_W);
 
-    lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "WEEKLY");
+    lv_obj_t *l = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "WEEKLY");
     lv_obj_set_pos(l, 12, 8);
-    pWeekPct = makeLabel(card, &lv_font_montserrat_16, COL_TEXT, "--");
+    pWeekPct = uiLabel(card, &lv_font_montserrat_16, COL_TEXT, "--");
     lv_obj_align(pWeekPct, LV_ALIGN_TOP_RIGHT, -12, 7);
     pWeekBar = makeBar(card, 28);
 
-    pW2Lbl = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "MODEL");
+    pW2Lbl = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "MODEL");
     lv_obj_set_pos(pW2Lbl, 12, 42);
-    pW2Pct = makeLabel(card, &lv_font_montserrat_16, COL_TEXT, "--");
+    pW2Pct = uiLabel(card, &lv_font_montserrat_16, COL_TEXT, "--");
     lv_obj_align(pW2Pct, LV_ALIGN_TOP_RIGHT, -12, 41);
     pW2Bar = makeBar(card, 62);
 
-    l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "TODAY");
+    l = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "TODAY");
     lv_obj_set_pos(l, 12, 80);
-    pTodayMsgs = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
+    pTodayMsgs = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
     lv_obj_align(pTodayMsgs, LV_ALIGN_TOP_RIGHT, -12, 80);
 
-    pTodayCost = makeLabel(card, &lv_font_montserrat_28, COL_TEXT, "$0.00");
-    lv_obj_set_pos(pTodayCost, 12, 98);
-    pTodayTok = makeLabel(card, &lv_font_montserrat_16, COL_ORANGE, "0");
+    pTodayCost = uiLabel(card, &lv_font_montserrat_28, COL_TEXT, "$0.00");
+    lv_obj_set_pos(pTodayCost, 12, TODAY_Y);
+    pTodayTok = uiLabel(card, &lv_font_montserrat_16, COL_ORANGE, "0");
     lv_obj_align(pTodayTok, LV_ALIGN_TOP_RIGHT, -12, 106);
 
-    pWeekReset = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
+    pWeekReset = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
     lv_obj_set_pos(pWeekReset, 12, 136);
 }
 
 void UsageScreen::buildHistory()
 {
-    lv_coord_t x = PAD + 172 + PAD + 200 + PAD;
-    lv_obj_t *card = makeCard(xPager.page(0), x, 640 - x - PAD);
+    lv_coord_t x = PAD + 172 + PAD + WEEK_W + PAD;
+    lv_obj_t *card = uiCard(xPager.page(0), x, 640 - x - PAD);
 
-    lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "LAST 12 HOURS");
+    lv_obj_t *l = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "LAST 12 HOURS");
     lv_obj_set_pos(l, 12, 8);
 
-    pClock = makeLabel(card, &lv_font_montserrat_16, COL_TEXT, "--:--");
+    pClock = uiLabel(card, &lv_font_montserrat_16, COL_TEXT, "--:--");
     lv_obj_align(pClock, LV_ALIGN_TOP_RIGHT, -12, 7);
 
     pDot = lv_obj_create(card);
@@ -218,18 +190,18 @@ void UsageScreen::buildHistory()
         pBars[i] = b;
     }
 
-    pPeak = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "-12h");
+    pPeak = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "-12h");
     lv_obj_set_pos(pPeak, CHART_X, CHART_TOP + CHART_H + 4);
-    l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "now");
+    l = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "now");
     lv_obj_update_layout(l);
     lv_obj_set_pos(l, CHART_X + (USAGE_HOURS - 1) * BAR_STEP + BAR_W - lv_obj_get_width(l), CHART_TOP + CHART_H + 4);
 
-    pModel = makeLabel(card, &lv_font_montserrat_14, COL_ORANGE, "");
+    pModel = uiLabel(card, &lv_font_montserrat_14, COL_ORANGE, "");
     lv_obj_set_pos(pModel, 12, 136);
     lv_label_set_long_mode(pModel, LV_LABEL_LONG_DOT);
     lv_obj_set_width(pModel, 120);
 
-    pBurn = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
+    pBurn = uiLabel(card, &lv_font_montserrat_14, COL_MUTED, "");
     lv_obj_align(pBurn, LV_ALIGN_TOP_RIGHT, -12, 136);
 
     // Now-playing row: hidden until audio streams. Tap it for the next track
@@ -252,29 +224,13 @@ void UsageScreen::buildHistory()
     lv_bar_set_range(pMusicBar, 0, 1000);
     lv_obj_clear_flag(pMusicBar, LV_OBJ_FLAG_CLICKABLE);
 
-    pMusicTitle = makeLabel(pMusicRow, &lv_font_montserrat_14, COL_ORANGE, "");
+    pMusicTitle = uiLabel(pMusicRow, &lv_font_montserrat_14, COL_ORANGE, "");
     lv_obj_set_pos(pMusicTitle, 12, 5);
     lv_label_set_long_mode(pMusicTitle, LV_LABEL_LONG_DOT);
     lv_obj_set_width(pMusicTitle, 140);
 
-    pMusicTime = makeLabel(pMusicRow, &lv_font_montserrat_14, COL_MUTED, "");
+    pMusicTime = uiLabel(pMusicRow, &lv_font_montserrat_14, COL_MUTED, "");
     lv_obj_align(pMusicTime, LV_ALIGN_TOP_RIGHT, -12, 5);
-}
-
-void UsageScreen::buildStats()
-{
-    // Placeholder until the stats page is built out
-    lv_obj_t *card = makeCard(xPager.page(1), PAD, 640 - 2 * PAD);
-
-    lv_obj_t *l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED, "UNDERSTAND YOUR CLAUDE USAGE");
-    lv_obj_set_pos(l, 16, 12);
-
-    l = makeLabel(card, &lv_font_montserrat_16, COL_TEXT, "Usage stats are coming soon");
-    lv_obj_align(l, LV_ALIGN_CENTER, 0, -8);
-    l = makeLabel(card, &lv_font_montserrat_14, COL_MUTED,
-                  "total tokens  " LV_SYMBOL_BULLET "  best day  " LV_SYMBOL_BULLET "  streaks  "
-                  LV_SYMBOL_BULLET "  longest task  " LV_SYMBOL_BULLET "  daily heatmap");
-    lv_obj_align(l, LV_ALIGN_CENTER, 0, 20);
 }
 
 void UsageScreen::refreshMusic()
@@ -413,11 +369,30 @@ void UsageScreen::apply()
         lv_obj_set_style_bg_color(pW2Bar, COL_BLUE, LV_PART_INDICATOR);
     }
 
-    // Today
-    snprintf(buf, sizeof(buf), "$%u.%02u", (unsigned)(d.todayCostCents / 100), (unsigned)(d.todayCostCents % 100));
-    lv_label_set_text(pTodayCost, buf);
+    // Today: cost on the left, tokens on the right. On a big day they don't
+    // both fit at full size, so drop " tok", then shrink the cost, then drop
+    // its cents, until they do.
+    char cost[16];
+    unsigned dollars = d.todayCostCents / 100, cents = d.todayCostCents % 100;
+    snprintf(cost, sizeof(cost), "$%u.%02u", dollars, cents);
     fmtTokens(buf, sizeof(buf), d.todayTokens);
-    strncat(buf, " tok", sizeof(buf) - strlen(buf) - 1);
+    size_t tokLen = strlen(buf);
+    strncat(buf, " tok", sizeof(buf) - tokLen - 1);
+    const lv_font_t *costFont = &lv_font_montserrat_28;
+    auto fits = [&]() {
+        return textWidth(costFont, cost) + TODAY_GAP + textWidth(&lv_font_montserrat_16, buf) <= TODAY_W;
+    };
+    if (!fits())
+        buf[tokLen] = '\0';
+    if (!fits())
+        costFont = &lv_font_montserrat_24;
+    if (!fits())
+        snprintf(cost, sizeof(cost), "$%u", dollars + (cents >= 50));
+    // Keep the bottom edge put when the font shrinks
+    lv_obj_set_style_text_font(pTodayCost, costFont, 0);
+    lv_obj_set_y(pTodayCost, TODAY_Y + lv_font_get_line_height(&lv_font_montserrat_28)
+                             - lv_font_get_line_height(costFont));
+    lv_label_set_text(pTodayCost, cost);
     lv_label_set_text(pTodayTok, buf);
     snprintf(buf, sizeof(buf), "%u msgs", (unsigned)d.todayMsgs);
     lv_label_set_text(pTodayMsgs, buf);
@@ -497,11 +472,14 @@ void UsageScreen::refreshTimers()
 void UsageScreen::pollCB(lv_timer_t *timer)
 {
     UsageScreen *self = (UsageScreen *)timer->user_data;
-    if (self->xLink.poll(self->xData)) {
+    int got = self->xLink.poll(self->xData, self->xStatsData);
+    if (got & SerialLink::GOT_USAGE) {
         self->xHaveData = true;
         self->xRxMs = to_ms_since_boot(get_absolute_time());
         self->apply();
     }
+    if (got & SerialLink::GOT_STATS)
+        self->xStatsPage.apply(self->xStatsData);
     // Catch a track starting or stopping straight away; the time updates once a second
     if (self->pAudio && self->pAudio->active() != self->xShowingMusic)
         self->refreshMusic();

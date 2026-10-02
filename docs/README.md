@@ -25,7 +25,7 @@ Mac                                              Board (RP2350, two cores)
 ┌──────────────────────────────┐                ┌──────────────────────────────────┐
 │ tools/claude_usage_host.py   │                │ core 0                           │
 │                              │   USB CDC      │   SerialLink   parse lines       │
-│  ~/.claude/projects/*.jsonl ─┼─► @CU ... ────►│   UsageScreen  LVGL widgets      │
+│  ~/.claude/projects/*.jsonl ─┼─► @CU @CS ────►│   UsageScreen  LVGL widgets      │
 │  api.anthropic.com usage ────┤   @A <pcm> ───►│   AutoRotate   QMI8658, 100 ms   │
 │  music files ► ffmpeg ───────┘                │   AudioPlayer  ring buffer (in)  │
 │                              │◄── @OK, @AF ───│ core 1                           │
@@ -51,8 +51,13 @@ feed the I2S PIO and watch the power button.
 |---|---|
 | `src/main.cpp` | Start-up: board, LCD, RTC, IMU, audio, LVGL, then the main loop |
 | `src/SerialLink.*` | Parser for the line protocol |
-| `src/UsageData.h` | The usage snapshot struct the parser fills |
-| `src/UsageScreen.*` | The UI: arc, bars, hourly chart, now-playing row |
+| `src/UsageData.h` | The usage snapshot and all-time stats structs the parser fills |
+| `src/UsageScreen.*` | The UI: owns both pages; the dashboard's arc, bars, hourly chart, now-playing row |
+| `src/StatsPage.*` | The second page: totals, best day, streaks, longest task, heatmap |
+| `src/Pager.*` | The two pages side by side, the slide between them and the page dots |
+| `src/Gestures.*` | Turns touches into edge drags, centre swipes and taps |
+| `src/LevelControls.*` | Brightness and volume, and the level meter shown while dragging |
+| `src/UiKit.*` | Card and label helpers and number formatting shared by both pages |
 | `src/AudioPlayer.*` | Ring buffer and playback of streamed PCM |
 | `src/AutoRotate.*` | Flips the picture when the board is turned over |
 | `src/Widgets.*` | Jon Durrant's original demo dashboard. Still compiled, no longer shown |
@@ -109,11 +114,11 @@ Unknown keys are ignored, so the host and the firmware can be updated
 separately.
 
 All-time stats for the stats page go in a separate line, sent on connect and
-then every 5 minutes. Current firmware ignores it until the stats page is built.
+then every 5 minutes. Firmware from before the stats page ignores it.
 
 | Direction | Line | Reply |
 |---|---|---|
-| Mac → board | `@CS key=value;key=value;...` | `@OK` (once the stats page exists) |
+| Mac → board | `@CS key=value;key=value;...` | `@OK` |
 
 | Key | Meaning |
 |---|---|
@@ -122,6 +127,7 @@ then every 5 minutes. Current firmware ignores it until the stats page is built.
 | `cs`, `ls` | Current and longest streak of days with usage |
 | `lt`, `ltd` | Longest task in minutes (a stretch of one session with no pause over 30 min), and its day |
 | `hm`, `hmax` | Heatmap: one digit 0-4 per day, from the Monday 15 weeks before this week's to today, to fill a 7-row grid column by column; tokens for level 4 |
+| `td` | Today's date on the Mac; the board adds the year to dates from other years |
 
 The Mac keeps these totals in `~/.config/claude-usage-display/history.json`
 (`--history-file`), because Claude Code deletes old logs after 30 days by
@@ -147,8 +153,8 @@ Two more lines exist for setting up [auto-rotation](#auto-rotation):
 | Mac → board | `@IMU` | `@IMU x=<n> y=<n> z=<n> rot=<90 or 270>` (accelerometer readings) |
 | board → Mac | `@ROT 90` or `@ROT 270` (the picture flipped) | |
 
-The firmware side is `src/SerialLink.cpp` (parser), `src/UsageScreen.cpp` (UI) and
-`src/AudioPlayer.cpp` (playback).
+The firmware side is `src/SerialLink.cpp` (parser), `src/UsageScreen.cpp` and
+`src/StatsPage.cpp` (UI) and `src/AudioPlayer.cpp` (playback).
 
 ## Host script
 
