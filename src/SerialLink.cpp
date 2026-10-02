@@ -21,9 +21,9 @@ static void copyStr(char *dst, size_t size, const char *src)
     dst[size - 1] = '\0';
 }
 
-bool SerialLink::poll(UsageData &out)
+int SerialLink::poll(UsageData &usage, StatsData &stats)
 {
-    bool got = false;
+    int got = 0;
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
     // A chunk cut short (host stopped mid-write) must not swallow later lines
@@ -60,7 +60,7 @@ bool SerialLink::poll(UsageData &out)
             if (ch == '\n') {
                 xBuf[xLen] = '\0';
                 if (!xOverflow && xLen > 0)
-                    got |= handleLine(xBuf, out);
+                    got |= handleLine(xBuf, usage, stats);
                 xLen = 0;
                 xOverflow = false;
                 continue;
@@ -106,11 +106,11 @@ void SerialLink::handleAudio(char *line)
     }
 }
 
-bool SerialLink::handleLine(char *line, UsageData &out)
+int SerialLink::handleLine(char *line, UsageData &out, StatsData &stats)
 {
     if (strcmp(line, "@PING") == 0) {
         printf("@PONG claude-usage 1\n");
-        return false;
+        return 0;
     }
     if (strcmp(line, "@IMU") == 0) {
         // For setting IMU_SHORT_AXIS / IMU_FLIP in AutoRotate.h
@@ -122,15 +122,29 @@ bool SerialLink::handleLine(char *line, UsageData &out)
         int rot = 0;
 #endif
         printf("@IMU x=%.2f y=%.2f z=%.2f rot=%d\n", a[0], a[1], a[2], rot);
-        return false;
+        return 0;
     }
     if (!strncmp(line, "@A", 2) || !strncmp(line, "@PLAY", 5) ||
         !strcmp(line, "@STOP") || !strncmp(line, "@VOL ", 5)) {
         handleAudio(line);
-        return false;
+        return 0;
+    }
+    if (!strncmp(line, "@CS ", 4)) {
+        StatsData d;
+        char *save = nullptr;
+        for (char *tok = strtok_r(line + 4, ";", &save); tok; tok = strtok_r(nullptr, ";", &save)) {
+            char *eq = strchr(tok, '=');
+            if (!eq)
+                continue;
+            *eq = '\0';
+            parseStat(tok, eq + 1, d);
+        }
+        stats = d;
+        printf("@OK\n");
+        return GOT_STATS;
     }
     if (strncmp(line, "@CU ", 4) != 0)
-        return false;
+        return 0;
 
     UsageData d;
     char *save = nullptr;
@@ -143,7 +157,7 @@ bool SerialLink::handleLine(char *line, UsageData &out)
     }
     out = d;
     printf("@OK\n");
-    return true;
+    return GOT_USAGE;
 }
 
 void SerialLink::parseField(char *key, char *val, UsageData &d)
@@ -173,5 +187,31 @@ void SerialLink::parseField(char *key, char *val, UsageData &d)
             else
                 break;
         }
+    }
+}
+
+void SerialLink::parseStat(char *key, char *val, StatsData &d)
+{
+    if (!strcmp(key, "tot"))       d.totalTokens = strtoull(val, nullptr, 10);
+    else if (!strcmp(key, "fd"))   copyStr(d.firstDay, sizeof(d.firstDay), val);
+    else if (!strcmp(key, "hd"))   copyStr(d.bestDay, sizeof(d.bestDay), val);
+    else if (!strcmp(key, "hdt"))  d.bestTokens = strtoull(val, nullptr, 10);
+    else if (!strcmp(key, "cs"))   d.streak = strtoul(val, nullptr, 10);
+    else if (!strcmp(key, "ls"))   d.longestStreak = strtoul(val, nullptr, 10);
+    else if (!strcmp(key, "lt"))   d.longestTaskMin = atol(val);
+    else if (!strcmp(key, "ltd"))  copyStr(d.longestTaskDay, sizeof(d.longestTaskDay), val);
+    else if (!strcmp(key, "hmax")) d.heatMax = strtoull(val, nullptr, 10);
+    else if (!strcmp(key, "td"))   copyStr(d.today, sizeof(d.today), val);
+    else if (!strcmp(key, "hm")) {
+        // Keep the most recent weeks if there are more than fit, dropping
+        // whole weeks so day 0 is still a Monday
+        size_t n = strlen(val);
+        size_t skip = n > STATS_HEAT_DAYS ? (n - STATS_HEAT_DAYS + 6) / 7 * 7 : 0;
+        size_t count = n - skip;
+        for (size_t i = 0; i < count; i++) {
+            char c = val[skip + i];
+            d.heat[i] = (c >= '0' && c <= '4') ? (uint8_t)(c - '0') : 0;
+        }
+        d.heatDays = (uint8_t)count;
     }
 }

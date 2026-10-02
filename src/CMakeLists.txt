@@ -9,6 +9,8 @@ add_executable(${NAME}
         Gestures.cpp
         LevelControls.cpp
         Pager.cpp
+        UiKit.cpp
+        StatsPage.cpp
 
         )
 
